@@ -80,6 +80,20 @@ Level.io can alert on the exit code:
 
 All thresholds are tunable (`--warn-pct`, `--crit-pct`, `--warn-days`, `--crit-days`).
 
+### If your RMM marks the action FAILED
+
+Level.io (and most RMMs) treat any non-zero exit as a failed action, and with **On failure: Fail
+pipeline** a worn drive will stop the pipeline. That is the script reporting correctly being read
+as an error. Set:
+
+```
+SSD_ALWAYS_EXIT_OK=true
+```
+
+The script then always exits 0. Drive status still appears in the output and the CSV — alert on
+the `RESULT:` line instead of the exit code. Leave it `false` if you *want* to alert on exit codes
+and your action is set to tolerate failure.
+
 ### Requirements
 
 - **root** (Level.io runs scripts as root by default)
@@ -217,6 +231,7 @@ Every option is a flag **or** an environment variable (use env vars in Level.io)
 | `--append-history` | `SSD_APPEND_HISTORY` | `false` | append to local file to build a trend log |
 | `--emit-csv` | `SSD_EMIT_CSV` | `false` | print CSV rows to stdout |
 | `--quiet` | `SSD_QUIET` | `false` | suppress the summary table |
+| `--always-exit-ok` | `SSD_ALWAYS_EXIT_OK` | `false` | always exit 0, for RMMs that fail an action on non-zero exit |
 | `--include-hdd` | `SSD_INCLUDE_HDD` | `false` | also report spinning disks |
 | `--devices` | `SSD_DEVICES` | autodetect | explicit device list |
 | `--hostname` | `SSD_HOSTNAME` | detected | override hostname |

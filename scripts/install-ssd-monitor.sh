@@ -40,6 +40,10 @@ fi
 : "${SSD_SCHEDULE:=weekly}"            # weekly | daily | none
 : "${SSD_SCHEDULE_TIME:=03:17}"        # HH:MM, local time
 : "${SSD_RUN_NOW:=true}"               # run once immediately after install
+# Set true if your RMM marks the action FAILED on any non-zero exit code.
+# The drive status still appears in the output and CSV; it just is not
+# signalled through the exit code.
+: "${SSD_ALWAYS_EXIT_OK:=false}"
 : "${SSD_INSTALL_PATH:=/usr/local/sbin/ssd-life-expectancy.sh}"
 : "${SSD_CONF_PATH:=/etc/ssd-life-expectancy.conf}"
 # Thresholds (see the reporter's --help for the full list)
@@ -106,6 +110,11 @@ HOSTNAME_OVERRIDE="${SSD_HOSTNAME:-}"
 DEVICES_OVERRIDE="${SSD_DEVICES:-}"              # space-separated, skip autodetect
 EMIT_CSV="${SSD_EMIT_CSV:-false}"                # dump raw CSV rows to stdout
 QUIET="${SSD_QUIET:-false}"
+# Always exit 0, whatever the drives say. For RMMs (Level.io included) that
+# treat any non-zero exit as a failed action and halt the pipeline: the drive
+# status still appears in the output and the CSV, it just stops being signalled
+# through the exit code. Alert on the RESULT line instead.
+ALWAYS_EXIT_OK="${SSD_ALWAYS_EXIT_OK:-false}"
 DEBUG="${SSD_DEBUG:-false}"                      # dump raw smartctl output
 ENABLE_SMART="${SSD_ENABLE_SMART:-true}"         # turn SMART on if the drive has it disabled
 UNKNOWN_IS_WARN="${SSD_UNKNOWN_IS_WARN:-true}"   # unreadable drive => WARN, not "healthy"
@@ -138,6 +147,7 @@ Output
   --append-history       append to local file instead of overwriting
   --emit-csv             print raw CSV rows to stdout (handy for Level.io output capture)
   --quiet                suppress the human-readable summary
+  --always-exit-ok       always exit 0 (for RMMs that fail an action on non-zero exit)
   --debug                dump raw smartctl output for each drive (for troubleshooting)
   --unknown-ok           treat unreadable drives as OK instead of WARN
   --no-enable-smart      do not run 'smartctl -s on' when a drive has SMART disabled
@@ -176,6 +186,7 @@ while [ $# -gt 0 ]; do
     --append-history)  APPEND_HISTORY=true; shift ;;
     --emit-csv)        EMIT_CSV=true; shift ;;
     --quiet)           QUIET=true; shift ;;
+    --always-exit-ok)  ALWAYS_EXIT_OK=true; shift ;;
     --debug)           DEBUG=true; shift ;;
     --unknown-ok)      UNKNOWN_IS_WARN=false; shift ;;
     --no-enable-smart) ENABLE_SMART=false; shift ;;
@@ -1057,6 +1068,9 @@ if [ "$EMIT_CSV" = "true" ]; then
   printf '%s\n' "${ROWS[@]}"
 fi
 
+if [ "$ALWAYS_EXIT_OK" = "true" ]; then
+  exit 0
+fi
 exit "$WORST"
 SSD_REPORTER_PAYLOAD_EOF
 
@@ -1105,6 +1119,7 @@ conf_line() {
   conf_line SSD_LOCK_STRATEGY    "${SSD_LOCK_STRATEGY:-auto}"
   conf_line SSD_STALE_LOCK_SECS  "${SSD_STALE_LOCK_SECS:-300}"
   conf_line SSD_QUIET            "${SSD_QUIET:-false}"
+  conf_line SSD_ALWAYS_EXIT_OK   "${SSD_ALWAYS_EXIT_OK:-false}"
 } > "$SSD_CONF_PATH"
 chmod 0644 "$SSD_CONF_PATH"
 
@@ -1228,4 +1243,8 @@ case "$RC" in
   2) say "    Drive status: CRITICAL — replace drive(s)" ;;
   3) say "    Drive status: reporter error — see messages above" ;;
 esac
+if [ "$SSD_ALWAYS_EXIT_OK" = "true" ]; then
+  say "    (exiting 0: SSD_ALWAYS_EXIT_OK is set — read the status line above, not the exit code)"
+  exit 0
+fi
 exit "$RC"

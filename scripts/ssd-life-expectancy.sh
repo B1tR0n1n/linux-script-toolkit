@@ -43,6 +43,11 @@ HOSTNAME_OVERRIDE="${SSD_HOSTNAME:-}"
 DEVICES_OVERRIDE="${SSD_DEVICES:-}"              # space-separated, skip autodetect
 EMIT_CSV="${SSD_EMIT_CSV:-false}"                # dump raw CSV rows to stdout
 QUIET="${SSD_QUIET:-false}"
+# Always exit 0, whatever the drives say. For RMMs (Level.io included) that
+# treat any non-zero exit as a failed action and halt the pipeline: the drive
+# status still appears in the output and the CSV, it just stops being signalled
+# through the exit code. Alert on the RESULT line instead.
+ALWAYS_EXIT_OK="${SSD_ALWAYS_EXIT_OK:-false}"
 DEBUG="${SSD_DEBUG:-false}"                      # dump raw smartctl output
 ENABLE_SMART="${SSD_ENABLE_SMART:-true}"         # turn SMART on if the drive has it disabled
 UNKNOWN_IS_WARN="${SSD_UNKNOWN_IS_WARN:-true}"   # unreadable drive => WARN, not "healthy"
@@ -75,6 +80,7 @@ Output
   --append-history       append to local file instead of overwriting
   --emit-csv             print raw CSV rows to stdout (handy for Level.io output capture)
   --quiet                suppress the human-readable summary
+  --always-exit-ok       always exit 0 (for RMMs that fail an action on non-zero exit)
   --debug                dump raw smartctl output for each drive (for troubleshooting)
   --unknown-ok           treat unreadable drives as OK instead of WARN
   --no-enable-smart      do not run 'smartctl -s on' when a drive has SMART disabled
@@ -113,6 +119,7 @@ while [ $# -gt 0 ]; do
     --append-history)  APPEND_HISTORY=true; shift ;;
     --emit-csv)        EMIT_CSV=true; shift ;;
     --quiet)           QUIET=true; shift ;;
+    --always-exit-ok)  ALWAYS_EXIT_OK=true; shift ;;
     --debug)           DEBUG=true; shift ;;
     --unknown-ok)      UNKNOWN_IS_WARN=false; shift ;;
     --no-enable-smart) ENABLE_SMART=false; shift ;;
@@ -994,4 +1001,7 @@ if [ "$EMIT_CSV" = "true" ]; then
   printf '%s\n' "${ROWS[@]}"
 fi
 
+if [ "$ALWAYS_EXIT_OK" = "true" ]; then
+  exit 0
+fi
 exit "$WORST"

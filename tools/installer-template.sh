@@ -40,6 +40,10 @@ fi
 : "${SSD_SCHEDULE:=weekly}"            # weekly | daily | none
 : "${SSD_SCHEDULE_TIME:=03:17}"        # HH:MM, local time
 : "${SSD_RUN_NOW:=true}"               # run once immediately after install
+# Set true if your RMM marks the action FAILED on any non-zero exit code.
+# The drive status still appears in the output and CSV; it just is not
+# signalled through the exit code.
+: "${SSD_ALWAYS_EXIT_OK:=false}"
 : "${SSD_INSTALL_PATH:=/usr/local/sbin/ssd-life-expectancy.sh}"
 : "${SSD_CONF_PATH:=/etc/ssd-life-expectancy.conf}"
 # Thresholds (see the reporter's --help for the full list)
@@ -109,6 +113,7 @@ conf_line() {
   conf_line SSD_LOCK_STRATEGY    "${SSD_LOCK_STRATEGY:-auto}"
   conf_line SSD_STALE_LOCK_SECS  "${SSD_STALE_LOCK_SECS:-300}"
   conf_line SSD_QUIET            "${SSD_QUIET:-false}"
+  conf_line SSD_ALWAYS_EXIT_OK   "${SSD_ALWAYS_EXIT_OK:-false}"
 } > "$SSD_CONF_PATH"
 chmod 0644 "$SSD_CONF_PATH"
 
@@ -232,4 +237,8 @@ case "$RC" in
   2) say "    Drive status: CRITICAL — replace drive(s)" ;;
   3) say "    Drive status: reporter error — see messages above" ;;
 esac
+if [ "$SSD_ALWAYS_EXIT_OK" = "true" ]; then
+  say "    (exiting 0: SSD_ALWAYS_EXIT_OK is set — read the status line above, not the exit code)"
+  exit 0
+fi
 exit "$RC"
