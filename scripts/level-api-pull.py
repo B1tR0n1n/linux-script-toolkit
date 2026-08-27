@@ -32,9 +32,15 @@ ROW_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z,")
 class ApiError(Exception):
     pass
 
+RETRY_CODES = {408, 425, 429, 500, 502, 503, 504}
+
 class Level:
-    def __init__(self, key, base, verbose=False, insecure=False):
+    def __init__(self, key, base, verbose=False, insecure=False, retries=5):
         self.key, self.base, self.verbose = key, base.rstrip("/"), verbose
+        self.retries = retries
+        self.throttled = 0
+        import threading
+        self._lock = threading.Lock()
         # The docs show an "Authorization" header but not its value format, so
         # try the raw key first and fall back to Bearer on a 401 rather than
         # guessing one and failing with an unhelpful error.
@@ -83,22 +89,46 @@ class Level:
         schemes = [self.scheme] if self.scheme else ["raw", "bearer"]
         last = None
         for sc in schemes:
-            try:
-                with self._open(url, sc) as r:
-                    body = r.read().decode("utf-8", "replace")
-                self.scheme = sc          # remember what worked
-                if self.verbose:
-                    print(f"  GET {url} -> 200", file=sys.stderr)
-                return json.loads(body)
-            except urllib.error.HTTPError as e:
-                last = e
-                if e.code == 401 and sc == "raw" and len(schemes) > 1:
-                    continue              # try Bearer
-                detail = e.read().decode("utf-8", "replace")[:300]
-                raise ApiError(f"HTTP {e.code} for {url}\n    {detail}") from None
-            except urllib.error.URLError as e:
-                raise ApiError(f"cannot reach {url}: {e.reason}") from None
+            # Polling hundreds of runs will hit a rate limit on any real API.
+            # A 429 is a "come back shortly", not a failure - treating it as
+            # fatal silently dropped whole batches of machines from the fleet
+            # view, which is the one outcome this tool must not produce.
+            for attempt in range(self.retries + 1):
+                try:
+                    with self._open(url, sc) as r:
+                        body = r.read().decode("utf-8", "replace")
+                    self.scheme = sc          # remember what worked
+                    if self.verbose:
+                        print(f"  GET {url} -> 200", file=sys.stderr)
+                    return json.loads(body)
+                except urllib.error.HTTPError as e:
+                    last = e
+                    if e.code == 401 and sc == "raw" and len(schemes) > 1:
+                        break                 # try Bearer instead
+                    if e.code in RETRY_CODES and attempt < self.retries:
+                        wait = self._retry_after(e, attempt)
+                        with self._lock:
+                            self.throttled += 1
+                        time.sleep(wait)
+                        continue
+                    detail = e.read().decode("utf-8", "replace")[:300]
+                    raise ApiError(f"HTTP {e.code} for {url}\n    {detail}") from None
+                except urllib.error.URLError as e:
+                    if attempt < self.retries:
+                        time.sleep(min(2 ** attempt, 20))
+                        continue
+                    raise ApiError(f"cannot reach {url}: {e.reason}") from None
         raise ApiError(f"authentication failed for {url}: {last}")
+
+    def _retry_after(self, err, attempt):
+        """Honour Retry-After when the server sends one; back off otherwise."""
+        try:
+            ra = err.headers.get("Retry-After")
+            if ra and str(ra).strip().isdigit():
+                return min(float(ra), 120.0)
+        except Exception:
+            pass
+        return min(2 ** attempt, 30)
 
 def walk_runs(api, list_path, automation_id, page_size, max_pages, verbose):
     """Yield run summaries. Pagination style is discovered, not assumed."""
@@ -358,7 +388,10 @@ def main():
     ap.add_argument("--show-path", default="/v2/automation-runs/{id}")
     ap.add_argument("--page-size", type=int, default=100)
     ap.add_argument("--max-pages", type=int, default=200)
-    ap.add_argument("-j", "--jobs", type=int, default=16)
+    ap.add_argument("-j", "--jobs", type=int, default=6,
+                    help="parallel API requests (default 6; raise only if you are not rate limited)")
+    ap.add_argument("--retries", type=int, default=5,
+                    help="retries per request on 429/5xx, with backoff (default 5)")
     ap.add_argument("--save-raw", help="also write every step output here, for troubleshooting")
     ap.add_argument("--insecure", action="store_true", help="skip TLS verification")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -379,7 +412,7 @@ def main():
     if not key:
         sys.exit("ERROR: set LEVEL_API_KEY (Settings -> API keys in Level).")
 
-    api = Level(key, args.base, args.verbose, args.insecure)
+    api = Level(key, args.base, args.verbose, args.insecure, args.retries)
 
     if args.list_devices:
         try:
@@ -584,6 +617,9 @@ def main():
     warn = sum(1 for r in best if r.split(",")[23] == "WARN")
     unk  = sum(1 for r in best if r.split(",")[23] == "UNKNOWN")
     print(f"\n{len(best)} drive(s) across {len({r.split(',')[1] for r in best})} machine(s) -> {args.output}")
+    if api.throttled:
+        print(f"  (rate limited {api.throttled} time(s); backed off and retried"
+              + (f" — lower -j below {args.jobs} if it persists)" if api.throttled > 50 else ")"))
     if crit: print(f"  CRITICAL: {crit}")
     if warn: print(f"  WARN:     {warn}")
     if unk:  print(f"  UNKNOWN:  {unk}  (could not read wear data)")
@@ -602,8 +638,14 @@ def main():
                 k = f"still {st} when the wait expired — device offline or slow"
             elif "no report row" in e:
                 k = "ran, but printed no CSV row — is SSD_EMIT_CSV=true on it?"
-            elif "HTTP" in e or "cannot reach" in e:
-                k = "API error fetching the run"
+            elif "HTTP" in e:
+                code = e.split("HTTP ")[-1].split()[0] if "HTTP " in e else "?"
+                if code == "429":
+                    k = "HTTP 429 rate limited — lower -j, or raise --retries"
+                else:
+                    k = f"HTTP {code} fetching the run"
+            elif "cannot reach" in e:
+                k = "network error fetching the run"
             else:
                 k = e[:70]
             buckets[k] = buckets.get(k, 0) + 1

@@ -285,6 +285,10 @@ just observed:
   up. Raising `--wait` helps for slow machines but not for powered-off ones.
 - **ran, but printed no CSV row** — the script ran and emitted nothing, so `SSD_EMIT_CSV`
   isn't `true` in the version that machine has, or the installer hasn't reached it yet.
+- **HTTP 429 rate limited** — polling hundreds of runs will hit the API's rate limit. These
+  are retried with backoff (honouring `Retry-After`), so they should no longer cost you
+  machines; if the summary reports heavy throttling anyway, lower `-j` (default 6) or raise
+  `--retries` (default 5).
 
 The full list goes to `<output>-missing.txt` either way — a machine quietly missing from the
 fleet file is how a dying drive hides.
