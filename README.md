@@ -267,7 +267,10 @@ silently missing from the fleet view is how a dying drive stays hidden. `SSD_PUS
 
 ### collect-ssd-output.sh
 
-Takes emitted report rows out of whatever surrounds them. Level.io wraps every
+Takes emitted report rows out of whatever surrounds them — including an RMM's
+**export of run results**, where each device's whole output sits inside one quoted CSV
+cell. Rows are found wherever they appear on a line, so the export's own columns in
+front of them (`md4065,Linux Devices,Success,5,<row>`) do not matter. Level.io wraps every
 output line in markdown fences and interleaves install chatter, so rows are found by
 shape — an ISO-8601 timestamp in field 1 and the right column count — rather than by
 position. Everything else is ignored.
@@ -277,6 +280,7 @@ position. Everything else is ignored.
 ./scripts/collect-ssd-output.sh ./logs -o fleet.csv      # a directory of logs
 ./scripts/collect-ssd-output.sh ./logs runs.txt          # any mix
 pbpaste | ./scripts/collect-ssd-output.sh                # straight off the clipboard
+./scripts/collect-ssd-output.sh results-export.csv       # an RMM run-results export
 ```
 
 It keeps the newest row per physical drive (asset_id + serial, same key the reporter

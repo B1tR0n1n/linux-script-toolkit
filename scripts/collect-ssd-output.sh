@@ -78,8 +78,32 @@ done
 # an ISO-8601 timestamp in field 1 and the expected column count. Header
 # lines, fences, and log chatter are ignored.
 sed -e 's/\r$//' -e 's/^[[:space:]]*```[a-zA-Z]*[[:space:]]*$//' "$RAW" \
-  | awk -F, -v n="$NCOL" '
-      $1 ~ /^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/ && NF==n { print }
+  | awk -v n="$NCOL" '
+      {
+        line = $0
+        # An RMM "export results" CSV carries the whole script output inside a
+        # quoted cell, so a report row can arrive wrapped in quotes, indented,
+        # or with CSV-doubled quotes. Unwrap before matching rather than
+        # requiring the row to start the line.
+        gsub(/""/, "\"", line)
+        sub(/^[[:space:]"]+/, "", line)
+        sub(/[[:space:]"]+$/, "", line)
+        # The row may not start the line: an export CSV puts its own columns
+        # first ("md4065,Linux Devices,Success,5,<row>"), so locate the
+        # timestamp anywhere on the line and read from there.
+        if (match(line, /[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z,/)) {
+          cand = substr(line, RSTART)
+          n2 = split(cand, f, ",")
+          if (n2 == n) { print cand }
+          else if (n2 > n) {
+            # Trailing text after the row (an exit code, a closing quote on the
+            # same line): keep the first n fields, drop the rest.
+            out = f[1]
+            for (i = 2; i <= n; i++) out = out "," f[i]
+            print out
+          }
+        }
+      }
     ' > "$ROWS"
 
 found=$(grep -c . "$ROWS" 2>/dev/null); found=$(printf '%s' "${found:-0}" | head -1)
