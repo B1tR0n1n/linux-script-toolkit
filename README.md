@@ -4,8 +4,27 @@ Operational Linux scripts for fleet management via [Level.io](https://level.io) 
 
 | Script | Purpose |
 | --- | --- |
-| [`scripts/ssd-life-expectancy.sh`](scripts/ssd-life-expectancy.sh) | Report SSD/NVMe wear, project an end-of-life date, write per-machine and/or fleet-master CSV. |
+| [`scripts/install-ssd-monitor.sh`](scripts/install-ssd-monitor.sh) | **Start here.** One paste: installs deps, installs the reporter, schedules it weekly, runs it now. |
+| [`scripts/ssd-life-expectancy.sh`](scripts/ssd-life-expectancy.sh) | The reporter itself. Run it directly if you don't want anything installed. |
 | [`scripts/merge-ssd-reports.sh`](scripts/merge-ssd-reports.sh) | Roll individual per-machine CSVs into one master file. |
+
+## Quick start — the whole thing in one paste
+
+Paste [`scripts/install-ssd-monitor.sh`](scripts/install-ssd-monitor.sh) into a Level.io script
+(Shell / run as root / target Linux) and run it. It installs `smartmontools` if missing, drops
+the reporter at `/usr/local/sbin`, schedules a weekly run, and reports immediately.
+
+For one fleet-wide file, set **one** variable — a path every machine can write to:
+
+```
+SSD_MASTER_PATH=/mnt/reports/ssd-life-master.csv
+```
+
+Output mode switches to `both` automatically when that is set, so you get the shared master
+*and* a local copy on each machine. Running it on 50 machines at once is safe (see
+**Fleet master file** below).
+
+Nothing else is required. Everything below is for tuning.
 
 ---
 
@@ -96,11 +115,23 @@ Requires a path every endpoint can write to (NFS/CIFS mount, or a synced directo
 | `SSD_OUTPUT_MODE` | `both` |
 | `SSD_MASTER_PATH` | `/mnt/reports/ssd-life-master.csv` |
 
-Concurrent writes are safe — the script takes an exclusive `flock` (with an atomic `mkdir`
-fallback for minimal images and NFS), and **replaces** that machine's previous row instead of
-appending duplicates. So the master stays exactly one row per drive per machine, no matter how
-often the automation runs. Verified with 20 machines writing simultaneously: no corruption, no
-duplicates.
+### Fleet master file — concurrent writes
+
+Running on many machines at once is the normal case, and it is safe:
+
+- **Locking adapts to the filesystem.** `flock` on local disks; on NFS/CIFS/SMB — where `flock`
+  semantics depend on the server and can silently fail to exclude — it switches to `mkdir`,
+  which is atomic by protocol. Force either with `SSD_LOCK_STRATEGY=flock|mkdir`.
+- **A broken `flock` never costs you a row.** If `flock` is missing or the filesystem refuses
+  the lock, it falls back to `mkdir` instead of skipping the write.
+- **Stale locks self-heal.** A run killed mid-write would otherwise block the whole fleet
+  forever; a lock older than `SSD_STALE_LOCK_SECS` (default 300) is broken automatically.
+- **One row per drive per machine.** Each machine replaces its own previous row rather than
+  appending, so the file does not grow with every run.
+
+Verified with 30 machines running the installer simultaneously against one master file: 60 rows,
+30 machines, 1 header, zero malformed rows, zero duplicates — on both locking strategies, and
+with `flock` deliberately broken.
 
 #### Option C — no shared mount? Let Level.io collect it
 
