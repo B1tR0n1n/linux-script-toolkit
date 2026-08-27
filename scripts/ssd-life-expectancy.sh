@@ -271,13 +271,25 @@ attr_table() {
 }
 
 # Normalized VALUE column (col 4) for an ATA attribute id.
-attr_norm() { printf '%s\n' "$ATTRS" | awk -v id="$1" '$1==id && NF>=8 {print $4+0; exit}'; }
+# Normalized VALUE (col 4) for an attribute id.
+# NF>=4, not NF>=8: the ID list shown for an UNKNOWN drive is built from column
+# 1 of every row, so a row with fewer columns than expected was reported as
+# "found" and then silently skipped here - the attribute appeared in the output
+# yet produced no reading. Only the first four columns are actually needed, and
+# $4 must be numeric so a malformed row cannot become a bogus 0%.
+attr_norm() {
+  printf '%s\n' "$ATTRS" | awk -v id="$1" '
+    $1==id && NF>=4 && $4 ~ /^[0-9]+$/ { print $4+0; exit }'
+}
 # RAW_VALUE for an ATA attribute id. RAW_VALUE is column 10; do NOT use $NF,
 # because smartctl appends notes to some rows, e.g.
 #   194 Temperature_Celsius ... 38 (Min/Max 0/71)
 # where $NF is "0/71)" rather than the value.
-attr_raw()  { printf '%s\n' "$ATTRS" | awk -v id="$1" '$1==id && NF>=10 {print $10; exit}
-                                                       $1==id && NF>=8 && NF<10 {print $NF; exit}'; }
+# RAW_VALUE is column 10. Require the full 10 columns: on a short row $NF is
+# THRESH or WHEN_FAILED, not the raw value, and returning that produced
+# confident nonsense (a 99% life reading off a threshold column). Every caller
+# tolerates a missing raw value; none tolerates a wrong one.
+attr_raw()  { printf '%s\n' "$ATTRS" | awk -v id="$1" '$1==id && NF>=10 {print $10; exit}'; }
 
 # Fetch SMART data, trying every device type and keeping the RICHEST response.
 #
@@ -676,7 +688,7 @@ for RAW_DEV in $(discover_devices); do
     # unexpected ID for wear (or a smartctl too old to know the drive).
     if [ -z "$LIFE_REMAIN" ] && [ -n "$ATTRS" ]; then
       read -r n_id n_name n_val <<EOF_ATTR
-$(printf '%s\n' "$ATTRS" | awk 'tolower($2) ~ /life|wear|lifetime|endurance|remain/ && NF>=8 {print $1" "$2" "$4+0; exit}')
+$(printf '%s\n' "$ATTRS" | awk 'tolower($2) ~ /life|wear|lifetime|endurance|remain/ && NF>=4 && $4 ~ /^[0-9]+$/ {print $1" "$2" "$4+0; exit}')
 EOF_ATTR
       if is_num "${n_val:-}" && [ "${n_val:-x}" -ge 0 ] 2>/dev/null && [ "${n_val:-x}" -le 100 ] 2>/dev/null; then
         LIFE_REMAIN="$n_val"; LIFE_USED="$((100 - n_val))"; LIFE_SOURCE="ata:${n_id}_${n_name}"
@@ -798,6 +810,21 @@ EOF3
     else
       ATTR_IDS="$(printf '%s\n' "$ATTRS" | awk '{printf "%s ", $1}')"
       REASON="no known wear attribute among IDs: ${ATTR_IDS}"
+      # Print the candidate rows exactly as parsed, with their column count.
+      # "the ID is listed but no value came out" is a column-layout problem,
+      # and this shows the layout instead of leaving it to be guessed.
+      UNKNOWN_DUMPS+=("--- $DEV: rows for known wear-attribute IDs, as parsed ---")
+      CAND="$(printf '%s\n' "$ATTRS" | awk '
+        $1==169||$1==177||$1==173||$1==201||$1==202||$1==203||$1==209||$1==231||$1==232||$1==233 {
+          printf "    [NF=%d] %s\n", NF, $0 }')"
+      if [ -n "$CAND" ]; then
+        while IFS= read -r cl; do UNKNOWN_DUMPS+=("$cl"); done <<< "$CAND"
+      else
+        UNKNOWN_DUMPS+=("    (none of the known wear IDs are present)")
+        UNKNOWN_DUMPS+=("--- $DEV: full attribute table, as parsed ---")
+        while IFS= read -r cl; do UNKNOWN_DUMPS+=("    $cl"); done \
+          <<< "$(printf '%s\n' "$ATTRS" | head -30)"
+      fi
     fi
     UNKNOWN_REASONS+=("$DEV: $REASON")
   fi
