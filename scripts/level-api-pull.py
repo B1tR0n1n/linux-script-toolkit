@@ -342,6 +342,8 @@ def discover(api, automation_id):
 def main():
     ap = argparse.ArgumentParser(description="Build the SSD fleet CSV from Level automation runs.")
     ap.add_argument("-o", "--output", default="fleet-ssd-master.csv")
+    ap.add_argument("--xlsx", nargs="?", const=True, metavar="PATH",
+                    help="also write a formatted Excel workbook (default: same name as -o with .xlsx)")
     ap.add_argument("--automation-id", help="only pull runs for this automation")
     ap.add_argument("--run-ids-file", help="skip listing; read run ids from this file, one per line")
     ap.add_argument("--trigger-token", help="webhook token: trigger the automation, then collect its runs")
@@ -550,6 +552,30 @@ def main():
     with open(args.output, "w") as fh:
         fh.write(HEADER + "\n")
         fh.write("\n".join(best) + "\n")
+
+    if args.xlsx:
+        # The converter lives beside this script; import it rather than
+        # duplicating the writer, so both routes produce the same workbook.
+        xlsx_path = None if args.xlsx is True else args.xlsx
+        # The file name contains hyphens, so it cannot be imported by name;
+        # load it by path from beside this script.
+        conv = None
+        import importlib.util
+        mod_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "ssd-csv-to-xlsx.py")
+        if os.path.exists(mod_path):
+            try:
+                spec = importlib.util.spec_from_file_location("ssd_csv_to_xlsx", mod_path)
+                conv = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(conv)
+            except Exception as e:
+                print(f"WARN: could not load the Excel writer: {e}", file=sys.stderr)
+        if conv is None:
+            print("WARN: ssd-csv-to-xlsx.py not found beside this script; "
+                  "skipping the Excel file.", file=sys.stderr)
+        else:
+            out_x, n = conv.convert(args.output, xlsx_path)
+            print(f"Wrote {out_x} ({n} row(s))")
 
     crit = sum(1 for r in best if r.split(",")[23] == "CRITICAL")
     warn = sum(1 for r in best if r.split(",")[23] == "WARN")

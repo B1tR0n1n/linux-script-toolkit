@@ -8,6 +8,7 @@ Operational Linux scripts for fleet management via [Level.io](https://level.io) 
 | [`scripts/ssd-life-expectancy.sh`](scripts/ssd-life-expectancy.sh) | The reporter itself. Run it directly if you don't want anything installed. |
 | [`scripts/collect-ssd-output.sh`](scripts/collect-ssd-output.sh) | Build a fleet master CSV from report output you already have (paste Level.io run history in). No SSH. |
 | [`scripts/level-api-pull.py`](scripts/level-api-pull.py) | Pull report rows from Level's API and build the fleet CSV in one command. |
+| [`scripts/ssd-csv-to-xlsx.py`](scripts/ssd-csv-to-xlsx.py) | Turn any fleet CSV into a formatted Excel workbook. Stdlib only — no pip install. |
 | [`scripts/setup-push-key.sh`](scripts/setup-push-key.sh) | RMM script: install the push key on each endpoint and verify it can reach the collector. |
 | [`scripts/pull-ssd-reports.sh`](scripts/pull-ssd-reports.sh) | SSH *out* to each machine and fetch its report. Needs an ssh client where you run it. |
 | [`scripts/merge-ssd-reports.sh`](scripts/merge-ssd-reports.sh) | Roll individual per-machine CSV files into one master file. |
@@ -248,6 +249,18 @@ Listed 900 automation run(s)
 ```
 
 Requires `SSD_EMIT_CSV=true`, since the row has to be in the run's output to reach the API.
+
+Add `--xlsx` for an Excel workbook alongside the CSV:
+
+```bash
+./scripts/level-api-pull.py --trigger-token <token> --device-ids-file devs.txt -o fleet.csv --xlsx
+```
+
+The sheet has a frozen, filterable header, numeric columns stored as numbers so sorting
+works, and rows shaded by status — red CRITICAL, amber WARN, grey UNKNOWN. Any fleet CSV
+can be converted after the fact with `ssd-csv-to-xlsx.py fleet.csv`, whichever route
+produced it. Both write the file directly as Office Open XML, so nothing needs installing
+on a locked-down workstation.
 
 The `Authorization` header value format is not documented, so the script sends the raw key
 first and retries as `Bearer <key>` on a 401, then remembers which worked. If the run-list
