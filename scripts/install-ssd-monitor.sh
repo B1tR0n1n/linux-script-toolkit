@@ -37,6 +37,9 @@ else
 fi
 : "${SSD_LOCAL_DIR:=/var/log/ssd-health}"
 : "${SSD_FORMAT:=both}"                # csv | json | both
+# Print the CSV rows to stdout as well, so an RMM that captures script output
+# (Level.io does) collects the fleet data without any shared storage.
+: "${SSD_EMIT_CSV:=false}"             # true | false
 : "${SSD_SCHEDULE:=weekly}"            # weekly | daily | none
 : "${SSD_SCHEDULE_TIME:=03:17}"        # HH:MM, local time
 : "${SSD_RUN_NOW:=true}"               # run once immediately after install
@@ -1165,6 +1168,7 @@ conf_line() {
   conf_line SSD_LOCAL_NAME       "${SSD_LOCAL_NAME:-}"
   conf_line SSD_MASTER_PATH      "$SSD_MASTER_PATH"
   conf_line SSD_FORMAT           "$SSD_FORMAT"
+  conf_line SSD_EMIT_CSV         "$SSD_EMIT_CSV"
   conf_line SSD_APPEND_HISTORY   "${SSD_APPEND_HISTORY:-false}"
   conf_line SSD_INCLUDE_HDD      "${SSD_INCLUDE_HDD:-false}"
   conf_line SSD_DEVICES          "${SSD_DEVICES:-}"
