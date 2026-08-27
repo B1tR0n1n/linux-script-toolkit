@@ -178,6 +178,7 @@ Every option is a flag **or** an environment variable (use env vars in Level.io)
 | `--host-regex` | `SSD_HOST_REGEX` | `[A-Za-z]{2,6}-?[0-9]{2,6}` | asset-id extraction |
 | `--debug` | `SSD_DEBUG` | `false` | dump raw smartctl output per drive |
 | `--unknown-ok` | `SSD_UNKNOWN_IS_WARN` | `true` | treat unreadable drives as OK instead of WARN |
+| `--no-enable-smart` | `SSD_ENABLE_SMART` | `true` | don't run `smartctl -s on` when a drive has SMART disabled |
 | `--warn-pct` | `SSD_WARN_PCT` | `20` | WARN at/below this % life left |
 | `--crit-pct` | `SSD_CRIT_PCT` | `10` | CRITICAL at/below this % |
 | `--warn-days` | `SSD_WARN_DAYS` | `180` | WARN at/below projected days |
@@ -226,6 +227,17 @@ sudo ./scripts/ssd-life-expectancy.sh --output-mode none --emit-csv --quiet
   if a drive still reports `UNKNOWN`, run with `--debug` to dump the raw output and see why.
 
 ## Troubleshooting a drive that reports UNKNOWN
+
+An `UNKNOWN` drive now **states its own reason** in the normal output — no debug run needed:
+
+| Reason shown | Meaning |
+| --- | --- |
+| `SMART is disabled on the drive` | SMART is off in firmware. The script runs `smartctl -s on` and re-reads automatically (disable with `--no-enable-smart`). |
+| `no known wear attribute among IDs: 9 194 250` | The attribute table was read, but none of the listed IDs is a recognized wear counter. Send that ID list and it can be added. |
+| `no attribute table returned (best probe: ...)` | No device type produced an attribute table. Names the probe that got furthest. |
+| `drive/controller does not support SMART` | Pass-through is blocked, typically by a RAID controller. |
+
+For the full dump:
 
 ```bash
 sudo ./scripts/ssd-life-expectancy.sh --debug --output-mode none

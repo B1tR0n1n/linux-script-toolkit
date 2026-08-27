@@ -44,6 +44,7 @@ DEVICES_OVERRIDE="${SSD_DEVICES:-}"              # space-separated, skip autodet
 EMIT_CSV="${SSD_EMIT_CSV:-false}"                # dump raw CSV rows to stdout
 QUIET="${SSD_QUIET:-false}"
 DEBUG="${SSD_DEBUG:-false}"                      # dump raw smartctl output
+ENABLE_SMART="${SSD_ENABLE_SMART:-true}"         # turn SMART on if the drive has it disabled
 UNKNOWN_IS_WARN="${SSD_UNKNOWN_IS_WARN:-true}"   # unreadable drive => WARN, not "healthy"
 LOCK_TIMEOUT="${SSD_LOCK_TIMEOUT:-30}"
 
@@ -74,6 +75,7 @@ Output
   --quiet                suppress the human-readable summary
   --debug                dump raw smartctl output for each drive (for troubleshooting)
   --unknown-ok           treat unreadable drives as OK instead of WARN
+  --no-enable-smart      do not run 'smartctl -s on' when a drive has SMART disabled
 
 Selection
   --include-hdd          include spinning disks (default: SSD/NVMe only)
@@ -111,6 +113,7 @@ while [ $# -gt 0 ]; do
     --quiet)           QUIET=true; shift ;;
     --debug)           DEBUG=true; shift ;;
     --unknown-ok)      UNKNOWN_IS_WARN=false; shift ;;
+    --no-enable-smart) ENABLE_SMART=false; shift ;;
     --include-hdd)     INCLUDE_HDD=true; shift ;;
     --devices)         DEVICES_OVERRIDE="${2:-}"; shift 2 ;;
     --hostname)        HOSTNAME_OVERRIDE="${2:-}"; shift 2 ;;
@@ -269,7 +272,7 @@ smart_score() {
 
 read_smart() {
   local dev="$1" out="" best="" best_score=0 sc
-  for dtype in "" "-d sat" "-d nvme" "-d scsi" "-d auto" "-d sat,12"; do
+  for dtype in "" "-d sat" "-d ata" "-d nvme" "-d scsi" "-d auto" "-d sat,12"; do
     # shellcheck disable=SC2086
     out="$(smartctl -a $dtype "$dev" 2>/dev/null)"
     [ -n "$out" ] || continue
@@ -367,6 +370,7 @@ master_write() {
 # Main scan
 # ---------------------------------------------------------------------------
 BEST_DTYPE=""
+UNKNOWN_REASONS=()
 ROWS=()
 JSON_ITEMS=()
 SUMMARY_LINES=()
@@ -393,6 +397,7 @@ for DEV in $(discover_devices); do
   [ -n "$BEST_DTYPE" ] || BEST_DTYPE="default"
 
   ATTRS="$(attr_table)"
+
 
   if [ "$DEBUG" = "true" ]; then
     echo "=================== DEBUG: $DEV ==================="
@@ -423,6 +428,28 @@ for DEV in $(discover_devices); do
   if [ "$MEDIA" = "HDD" ] && [ "$INCLUDE_HDD" != "true" ]; then
     SKIPPED+=("$DEV: rotational disk (use --include-hdd to report it)")
     continue
+  fi
+
+  # A drive with SMART turned off answers with identity but no attributes.
+  # Enabling it is a standard, persistent monitoring setting - not a data change.
+  if [ -z "$ATTRS" ] && [ "$PROTOCOL" != "nvme" ] \
+     && printf '%s\n' "$SMART" | grep -qi 'SMART support is:[[:space:]]*Disabled'; then
+    if [ "$ENABLE_SMART" = "true" ]; then
+      say "NOTE: SMART is disabled on $DEV — enabling it (smartctl -s on)."
+      # shellcheck disable=SC2086
+      if [ "$BEST_DTYPE" = "default" ] || [ -z "$BEST_DTYPE" ]; then
+        smartctl -s on "$DEV" >/dev/null 2>&1
+      else
+        # shellcheck disable=SC2086
+        smartctl -s on $BEST_DTYPE "$DEV" >/dev/null 2>&1
+      fi
+      if SMART_RETRY="$(read_smart "$DEV")" && [ -n "$SMART_RETRY" ]; then
+        SMART="$(printf '%s\n' "$SMART_RETRY" | tail -n +2)"
+        ATTRS="$(attr_table)"
+      fi
+    else
+      say "NOTE: SMART is disabled on $DEV. Enable it with: smartctl -s on $DEV"
+    fi
   fi
 
   FOUND=$((FOUND+1))
@@ -576,7 +603,21 @@ EOF3
   # --- status ----------------------------------------------------------------
   STATUS="OK"; REASON=""
   if [ -z "${LIFE_REMAIN:-}" ]; then
-    STATUS="UNKNOWN"; REASON="no life attribute exposed"
+    STATUS="UNKNOWN"
+    # Say exactly what was missing, so this is diagnosable from one run.
+    if [ -z "$ATTRS" ]; then
+      if printf '%s\n' "$SMART" | grep -qi 'SMART support is:[[:space:]]*Disabled'; then
+        REASON="SMART is disabled on the drive"
+      elif printf '%s\n' "$SMART" | grep -qi 'SMART support is:[[:space:]]*Unavailable\|does not support SMART'; then
+        REASON="drive/controller does not support SMART"
+      else
+        REASON="no attribute table returned (best probe: smartctl -a ${BEST_DTYPE} )"
+      fi
+    else
+      ATTR_IDS="$(printf '%s\n' "$ATTRS" | awk '{printf "%s ", $1}')"
+      REASON="no known wear attribute among IDs: ${ATTR_IDS}"
+    fi
+    UNKNOWN_REASONS+=("$DEV: $REASON")
   fi
   if is_num "${LIFE_REMAIN:-}"; then
     if [ "$LIFE_REMAIN" -le "$WARN_PCT" ]; then STATUS="WARN"; REASON="${LIFE_REMAIN}% life left"; fi
@@ -670,8 +711,9 @@ fi
 say ""
 HEALTHY=$((FOUND - UNKNOWN_COUNT))
 if [ "$UNKNOWN_COUNT" -gt 0 ]; then
-  say "NOTE: $UNKNOWN_COUNT of $FOUND drive(s) exposed no wear attribute — their health is UNKNOWN, not OK."
-  say "      Re-run with --debug to dump the raw smartctl output for those drives."
+  say "NOTE: $UNKNOWN_COUNT of $FOUND drive(s) exposed no wear attribute — health is UNKNOWN, not OK."
+  for r in "${UNKNOWN_REASONS[@]}"; do say "      $r"; done
+  say "      For the full SMART dump, re-run with SSD_DEBUG=true (or --debug)."
 fi
 case "$WORST" in
   0) if [ "$UNKNOWN_COUNT" -gt 0 ]; then
