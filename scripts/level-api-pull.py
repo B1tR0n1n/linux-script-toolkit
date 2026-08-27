@@ -467,6 +467,7 @@ def main():
     # yet. Poll until every run reaches a terminal state, or the wait budget
     # runs out - reading too early would report the whole fleet as row-less.
     results = {}
+    last_status = {}
     pending = list(ids)
     if triggered:
         deadline = time.time() + args.wait
@@ -477,6 +478,7 @@ def main():
                         results[run_id] = (None, err)
                     else:
                         st = (data or {}).get("status", "")
+                        last_status[run_id] = st or "unknown"
                         if st in TERMINAL:
                             results[run_id] = (data, None)
                         # else leave it pending
@@ -485,7 +487,8 @@ def main():
                 break
             if time.time() >= deadline:
                 for i in pending:
-                    results[i] = (None, f"still running after {args.wait}s")
+                    st = last_status.get(i, "unknown")
+                    results[i] = (None, f"not finished within {args.wait}s (status={st})")
                 break
             print(f"  {len(results)}/{len(ids)} finished, waiting on {len(pending)}...",
                   file=sys.stderr)
@@ -519,7 +522,7 @@ def main():
         # Name the actual cause. "no rows" from runs that simply had not
         # finished is a different problem from runs that finished without
         # emitting anything, and blaming the wrong one sends you the wrong way.
-        unfinished = sum(1 for _, e in failed if "still running" in str(e))
+        unfinished = sum(1 for _, e in failed if "not finished" in str(e))
         print("ERROR: no report rows found.", file=sys.stderr)
         if unfinished:
             print(f"       {unfinished} of {len(failed)} run(s) had not finished within the wait.",
@@ -586,11 +589,30 @@ def main():
     if unk:  print(f"  UNKNOWN:  {unk}  (could not read wear data)")
     if failed:
         # A machine absent from the fleet file is how a dying drive hides, so
-        # name what did not make it rather than reporting only successes.
+        # break the gap down here rather than leaving it in a file to open.
         miss = args.output.rsplit(".", 1)[0] + "-missing.txt"
         with open(miss, "w") as fh:
             fh.write("\n".join(f"{h}\t{e}" for h, e in failed) + "\n")
-        print(f"  {len(failed)} run(s) produced no row — see {miss}")
+        print(f"\n  {len(failed)} of {len(ids)} run(s) produced no row:")
+        buckets = {}
+        for _, e in failed:
+            e = str(e)
+            if "not finished" in e:
+                st = e.split("status=")[-1].rstrip(")") if "status=" in e else "?"
+                k = f"still {st} when the wait expired — device offline or slow"
+            elif "no report row" in e:
+                k = "ran, but printed no CSV row — is SSD_EMIT_CSV=true on it?"
+            elif "HTTP" in e or "cannot reach" in e:
+                k = "API error fetching the run"
+            else:
+                k = e[:70]
+            buckets[k] = buckets.get(k, 0) + 1
+        for k, n in sorted(buckets.items(), key=lambda x: -x[1]):
+            print(f"      {n:>5}  {k}")
+        print(f"    full list: {miss}")
+        if any("wait expired" in k for k in buckets):
+            print(f"    -> raise --wait (currently {args.wait}s), or re-run later for machines"
+                  f" that were offline; they finish whenever they next check in.")
 
     if crit: sys.exit(2)
     if warn: sys.exit(1)

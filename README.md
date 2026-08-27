@@ -268,8 +268,26 @@ endpoint differs from `/v2/automation-runs`, pass `--list-path`; if listing is u
 entirely, `--run-ids-file` takes a list of run ids instead. `--save-raw` dumps every step's
 output for troubleshooting.
 
-Runs that produced no row are written to `<output>-missing.txt` rather than being counted as
-absent — a machine quietly missing from the fleet file is how a dying drive hides.
+### When fewer machines report than you triggered
+
+The run summary breaks the gap down by cause, so a short count is explained rather than
+just observed:
+
+```
+  50 of 100 run(s) produced no row:
+         25  still when_next_online when the wait expired — device offline or slow
+         25  ran, but printed no CSV row — is SSD_EMIT_CSV=true on it?
+    full list: fleet-missing.txt
+```
+
+- **still queued / when_next_online** — the device was off or hadn't checked in. Level holds
+  the run until it does, so those finish on their own schedule; re-running later picks them
+  up. Raising `--wait` helps for slow machines but not for powered-off ones.
+- **ran, but printed no CSV row** — the script ran and emitted nothing, so `SSD_EMIT_CSV`
+  isn't `true` in the version that machine has, or the installer hasn't reached it yet.
+
+The full list goes to `<output>-missing.txt` either way — a machine quietly missing from the
+fleet file is how a dying drive hides.
 
 ### No shared mount? Push to a collection host
 
