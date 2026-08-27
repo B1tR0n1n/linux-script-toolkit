@@ -191,10 +191,29 @@ Level's API exposes each automation run's step output, which is where the emitte
 lands. `level-api-pull.py` (stdlib Python 3 only) lists the runs, fetches each with
 `include_steps=true`, extracts the row from the output text, and writes the fleet CSV.
 
+There is **no endpoint that lists past runs** — `/v2/automation-runs` exists only as
+`/{id}`. Run ids come from triggering: `POST /v2/automations/webhooks/{token}` returns
+`{"runs":[{"id","device_id"}]}`, one per device. So the script triggers the automation,
+collects the ids it gets back, polls each until it finishes, and reads the output.
+
 ```bash
-export LEVEL_API_KEY=xxxxx                       # Settings -> API keys
-./scripts/level-api-pull.py --automation-id <id> -o fleet-ssd-master.csv
+export LEVEL_API_KEY=xxxxx                       # Settings -> API keys (write-enabled)
+./scripts/level-api-pull.py --trigger-token <webhook-token> --all-devices -o fleet.csv
 ```
+
+```
+Triggering for 900 device(s) from /v2/devices
+Triggered 900 run(s)
+  312/900 finished, waiting on 588...
+900 drive(s) across 900 machine(s) -> fleet.csv
+  CRITICAL: 41
+  WARN:     117
+```
+
+Add a **webhook trigger** to the automation in Level to get the token. `--all-devices`
+triggers every device the API lists; `--device-ids-file` restricts it; omit both and the
+webhook's own conditions decide. `--wait` (default 900s) bounds how long to wait for runs
+to finish, and runs still going when it expires are reported rather than silently dropped.
 
 ```
 Listed 900 automation run(s)
