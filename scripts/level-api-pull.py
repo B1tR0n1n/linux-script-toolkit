@@ -79,6 +79,8 @@ def walk_runs(api, list_path, automation_id, page_size, max_pages, verbose):
     params = {}
     if automation_id:
         params["automation_id"] = automation_id
+        if verbose:
+            print(f"  filtering on automation_id={automation_id}", file=sys.stderr)
     while page <= max_pages:
         p = dict(params)
         p["page"], p["per_page"] = page, page_size
@@ -121,6 +123,87 @@ def extract_rows(text):
             out.append(",".join(f[:NCOL]))   # drop trailing text on the line
     return out
 
+def id_variants(raw):
+    """Return the plausible forms of an id.
+
+    Ids copied from the web UI are base64 of a GraphQL global id, e.g.
+    Z2lk... decodes to "gid://level/Automation/180096". The API may want that
+    base64 form, the decoded gid, or the bare numeric id at the end, and the
+    docs do not say which - so try all three rather than assume.
+    """
+    if not raw:
+        return []
+    out = [raw]
+    try:
+        import base64
+        padded = raw + "=" * (-len(raw) % 4)
+        dec = base64.b64decode(padded).decode("utf-8")
+        if dec.startswith("gid://"):
+            out.append(dec)
+            tail = dec.rstrip("/").rsplit("/", 1)[-1]
+            if tail.isdigit():
+                out.append(tail)
+    except Exception:
+        pass
+    return out
+
+def discover(api, automation_id):
+    """Probe candidate endpoints and report what the account can actually see.
+
+    The docs published a "Show automation run" endpoint but not a way to list
+    runs, and /v2/automation-runs returns 404. Rather than guess one path at a
+    time across round-trips, try the plausible ones and report the results.
+    """
+    variants = id_variants(automation_id)
+    if len(variants) > 1:
+        print("Automation id forms to try (web-UI ids are base64 of a gid):")
+        for v in variants:
+            print(f"  {v}")
+        print()
+    candidates = [
+        "/v2/devices",                                   # known-good, proves auth
+        "/v2/automations",
+        "/v2/automation-runs",
+        "/v2/automation_runs",
+        "/v2/runs",
+        "/v1/automation-runs",
+        "/v2/scripts",
+        "/v2/script-runs",
+    ]
+    for v in variants:
+        candidates += [
+            f"/v2/automations/{v}",
+            f"/v2/automations/{v}/runs",
+            f"/v2/automations/{v}/automation-runs",
+            f"/v2/automations/{v}/history",
+        ]
+    print("Probing endpoints (200 = exists, 404 = no such path, 401 = auth problem)\n")
+    found = []
+    for path in candidates:
+        if "{automation_id}" in path:
+            print(f"  {'skip':<5}  {path}   (pass --automation-id to test this one)")
+            continue
+        try:
+            data = api.get(path, {"page": 1, "per_page": 1})
+            keys = sorted(data.keys()) if isinstance(data, dict) else f"list[{len(data)}]"
+            print(f"  {'200':<5}  {path}   -> {keys}")
+            found.append(path)
+        except ApiError as e:
+            first = str(e).splitlines()[0]
+            code = first.split()[1] if first.startswith("HTTP") else "err"
+            print(f"  {code:<5}  {path}")
+    print()
+    if found:
+        print("Endpoints that responded:")
+        for f in found:
+            print(f"  {f}")
+        print("\nIf one of these lists automation runs, re-run with:")
+        print(f"  --list-path {found[-1]}")
+    else:
+        print("Nothing responded. Check the API key and the base URL.")
+    print("\nIf none of these is right, look in the API docs sidebar under")
+    print("Automations for whatever sits next to 'Show automation run'.")
+
 def main():
     ap = argparse.ArgumentParser(description="Build the SSD fleet CSV from Level automation runs.")
     ap.add_argument("-o", "--output", default="fleet-ssd-master.csv")
@@ -135,6 +218,8 @@ def main():
     ap.add_argument("--save-raw", help="also write every step output here, for troubleshooting")
     ap.add_argument("--insecure", action="store_true", help="skip TLS verification")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--discover", action="store_true",
+                    help="probe likely endpoints and report which ones exist, then stop")
     args = ap.parse_args()
 
     key = os.environ.get("LEVEL_API_KEY", "")
@@ -142,6 +227,10 @@ def main():
         sys.exit("ERROR: set LEVEL_API_KEY (Settings -> API keys in Level).")
 
     api = Level(key, args.base, args.verbose, args.insecure)
+
+    if args.discover:
+        discover(api, args.automation_id)
+        return
 
     # --- which runs -------------------------------------------------------
     try:
