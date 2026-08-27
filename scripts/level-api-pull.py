@@ -210,6 +210,50 @@ def id_variants(raw):
         pass
     return out
 
+def list_webhooks(api):
+    """Find existing automation webhooks and show their tokens.
+
+    The trigger endpoint takes a webhook token, which is otherwise only
+    visible in the UI when the webhook is created. The docs list a
+    "List automation webhooks" endpoint but not its path, so try the
+    plausible ones.
+    """
+    paths = [
+        "/v2/automations/webhooks",
+        "/v2/automation-webhooks",
+        "/v2/automation_webhooks",
+        "/v2/webhooks",
+    ]
+    for path in paths:
+        try:
+            data = api.get(path, {"page": 1, "per_page": 100})
+        except ApiError as e:
+            first = str(e).splitlines()[0]
+            code = first.split()[1] if first.startswith("HTTP") else "err"
+            print(f"  {code:<5}  {path}")
+            continue
+        items = data.get("data") if isinstance(data, dict) else data
+        print(f"  {'200':<5}  {path}")
+        if not isinstance(items, list) or not items:
+            print("         (responded, but no webhooks listed)")
+            continue
+        print()
+        for w in items:
+            if not isinstance(w, dict):
+                continue
+            tok = next((w[k] for k in ("token", "webhook_token", "key", "id") if w.get(k)), None)
+            name = w.get("name") or w.get("automation_name") or ""
+            print(f"    {name}")
+            for k in sorted(w):
+                print(f"      {k} = {w[k]!r}")
+            if tok:
+                print(f"      -> use: --trigger-token {tok}")
+            print()
+        return
+    print("\nNo webhook list endpoint responded. Create a webhook trigger on the")
+    print("automation in Level; the token is the last path segment of the URL it shows:")
+    print("  https://api.level.io/v2/automations/webhooks/<TOKEN>")
+
 def discover(api, automation_id):
     """Probe candidate endpoints and report what the account can actually see.
 
@@ -300,6 +344,8 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--discover", action="store_true",
                     help="probe likely endpoints and report which ones exist, then stop")
+    ap.add_argument("--list-webhooks", action="store_true",
+                    help="find existing automation webhooks and print their tokens, then stop")
     ap.add_argument("--dump", metavar="PATH",
                     help="GET this path and print the raw JSON, then stop (e.g. /v2/automations)")
     args = ap.parse_args()
@@ -309,6 +355,10 @@ def main():
         sys.exit("ERROR: set LEVEL_API_KEY (Settings -> API keys in Level).")
 
     api = Level(key, args.base, args.verbose, args.insecure)
+
+    if args.list_webhooks:
+        list_webhooks(api)
+        return
 
     if args.dump:
         try:
