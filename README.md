@@ -7,7 +7,8 @@ Operational Linux scripts for fleet management via [Level.io](https://level.io) 
 | [`scripts/install-ssd-monitor.sh`](scripts/install-ssd-monitor.sh) | **Start here.** One paste: installs deps, installs the reporter, schedules it weekly, runs it now. |
 | [`scripts/ssd-life-expectancy.sh`](scripts/ssd-life-expectancy.sh) | The reporter itself. Run it directly if you don't want anything installed. |
 | [`scripts/collect-ssd-output.sh`](scripts/collect-ssd-output.sh) | Build a fleet master CSV from report output you already have (paste Level.io run history in). No SSH. |
-| [`scripts/pull-ssd-reports.sh`](scripts/pull-ssd-reports.sh) | SSH to each machine, fetch its report file, and build the fleet master CSV. |
+| [`scripts/setup-push-key.sh`](scripts/setup-push-key.sh) | RMM script: install the push key on each endpoint and verify it can reach the collector. |
+| [`scripts/pull-ssd-reports.sh`](scripts/pull-ssd-reports.sh) | SSH *out* to each machine and fetch its report. Needs an ssh client where you run it. |
 | [`scripts/merge-ssd-reports.sh`](scripts/merge-ssd-reports.sh) | Roll individual per-machine CSV files into one master file. |
 
 ## Quick start — the whole thing in one paste
@@ -202,7 +203,49 @@ Build the master on the collection host, from the same directory:
 ./collect-ssd-output.sh /srv/ssd-reports -o fleet-ssd-master.csv
 ```
 
-**Setting up the collection host** (once):
+Everything below runs as RMM scripts — you never need an SSH client on your own
+workstation, and you never SSH to an endpoint by hand.
+
+**1. On the collection host** (once, by hand):
+
+```bash
+sudo useradd -m -d /srv/ssd-collect -s /bin/bash ssdcollect
+sudo mkdir -p /srv/ssd-reports && sudo chown ssdcollect /srv/ssd-reports
+sudo -u ssdcollect ssh-keygen -t ed25519 -N '' -f /tmp/ssdpush   # one key for the fleet
+sudo -u ssdcollect mkdir -p /srv/ssd-collect/.ssh
+# Restrict the key so it can only move files — no shell, no forwarding:
+printf 'command="internal-sftp",restrict %s\n' "$(cat /tmp/ssdpush.pub)" \
+  | sudo -u ssdcollect tee -a /srv/ssd-collect/.ssh/authorized_keys
+sudo -u ssdcollect chmod 700 /srv/ssd-collect/.ssh
+sudo -u ssdcollect chmod 600 /srv/ssd-collect/.ssh/authorized_keys
+cat /tmp/ssdpush     # the private key — paste into an RMM secret variable, then delete it
+```
+
+One shared key across the fleet is the practical choice at hundreds of machines. The
+`command="internal-sftp",restrict` prefix is what makes that acceptable: the key can move
+files and nothing else, even if an endpoint is compromised.
+
+**2. Deploy it to the fleet** with [`scripts/setup-push-key.sh`](scripts/setup-push-key.sh)
+as an RMM script, with these variables:
+
+| Variable | Value |
+| --- | --- |
+| `SSD_PUSH_KEY` | the private key text — use a **secret** variable |
+| `SSD_PUSH_HOST` | `mddb` |
+| `SSD_PUSH_USER` | `ssdcollect` |
+
+It installs the key at `/root/.ssh/id_ssdpush` with `0600`, records the host key, **verifies
+the machine can actually reach the collector**, and writes `SSD_PUSH_TARGET` into
+`/etc/ssd-life-expectancy.conf` so scheduled runs push too. It exits 1 if the push does not
+work, so a machine that silently would never report shows as a failed action instead.
+
+**3. Build the master** on the collection host whenever you want it:
+
+```bash
+./collect-ssd-output.sh /srv/ssd-reports -o fleet-ssd-master.csv
+```
+
+<details><summary>Manual collector setup, the long way</summary>
 
 ```bash
 # on the collector
@@ -216,6 +259,7 @@ sudo ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519    # if it has no key
 
 Give that account nothing beyond write access to the report directory. It is reachable
 from every endpoint in the fleet, so it should not be able to do anything else.
+</details>
 
 A failed push is reported as a warning on the endpoint and in the RMM output — a machine
 silently missing from the fleet view is how a dying drive stays hidden. `SSD_PUSH_RETRIES`
