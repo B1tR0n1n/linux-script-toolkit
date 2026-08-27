@@ -6,7 +6,8 @@ Operational Linux scripts for fleet management via [Level.io](https://level.io) 
 | --- | --- |
 | [`scripts/install-ssd-monitor.sh`](scripts/install-ssd-monitor.sh) | **Start here.** One paste: installs deps, installs the reporter, schedules it weekly, runs it now. |
 | [`scripts/ssd-life-expectancy.sh`](scripts/ssd-life-expectancy.sh) | The reporter itself. Run it directly if you don't want anything installed. |
-| [`scripts/merge-ssd-reports.sh`](scripts/merge-ssd-reports.sh) | Roll individual per-machine CSVs into one master file. |
+| [`scripts/collect-ssd-output.sh`](scripts/collect-ssd-output.sh) | Build a fleet master CSV from emitted output — paste Level.io run history straight in. |
+| [`scripts/merge-ssd-reports.sh`](scripts/merge-ssd-reports.sh) | Roll individual per-machine CSV files into one master file. |
 
 ## Quick start — the whole thing in one paste
 
@@ -164,8 +165,31 @@ which Level.io captures as the script's output — copy them out of the run hist
 the local files later and merge them:
 
 ```bash
+# From Level.io run history: select the output, save it, and feed it in.
+./scripts/collect-ssd-output.sh runs.txt -o fleet-ssd-master.csv
+
+# Or from collected per-machine files
 ./scripts/merge-ssd-reports.sh -i ./collected -o fleet-ssd-master.csv --sort-by-life
 ```
+
+### collect-ssd-output.sh
+
+Takes emitted report rows out of whatever surrounds them. Level.io wraps every
+output line in markdown fences and interleaves install chatter, so rows are found by
+shape — an ISO-8601 timestamp in field 1 and the right column count — rather than by
+position. Everything else is ignored.
+
+```bash
+./scripts/collect-ssd-output.sh runs.txt                 # a saved run log
+./scripts/collect-ssd-output.sh ./logs -o fleet.csv      # a directory of logs
+./scripts/collect-ssd-output.sh ./logs runs.txt          # any mix
+pbpaste | ./scripts/collect-ssd-output.sh                # straight off the clipboard
+```
+
+It keeps the newest row per physical drive (asset_id + serial, same key the reporter
+uses), sorts worst-drive-first by default — `--by-asset` or `--by-date` to change —
+and prints a replacement queue. Drives with no reading sort last rather than as 0%.
+Exits 2 if anything is CRITICAL, 1 for WARN, 0 otherwise.
 
 ### 3. Create the automation
 
