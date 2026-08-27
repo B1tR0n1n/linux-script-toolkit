@@ -188,6 +188,16 @@ def discover(api, automation_id):
             keys = sorted(data.keys()) if isinstance(data, dict) else f"list[{len(data)}]"
             print(f"  {'200':<5}  {path}   -> {keys}")
             found.append(path)
+            # Print one record's fields. The whole problem is that ids in the
+            # web UI do not match the API's, and a sample answers that
+            # immediately instead of costing another exchange.
+            items = data.get("data") if isinstance(data, dict) else data
+            if isinstance(items, list) and items and isinstance(items[0], dict):
+                rec = items[0]
+                print(f"         sample fields: {sorted(rec.keys())}")
+                for k in ("id", "name", "hostname", "automation_id", "status"):
+                    if k in rec:
+                        print(f"           {k} = {rec[k]!r}")
         except ApiError as e:
             first = str(e).splitlines()[0]
             code = first.split()[1] if first.startswith("HTTP") else "err"
@@ -220,6 +230,8 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--discover", action="store_true",
                     help="probe likely endpoints and report which ones exist, then stop")
+    ap.add_argument("--dump", metavar="PATH",
+                    help="GET this path and print the raw JSON, then stop (e.g. /v2/automations)")
     args = ap.parse_args()
 
     key = os.environ.get("LEVEL_API_KEY", "")
@@ -227,6 +239,14 @@ def main():
         sys.exit("ERROR: set LEVEL_API_KEY (Settings -> API keys in Level).")
 
     api = Level(key, args.base, args.verbose, args.insecure)
+
+    if args.dump:
+        try:
+            data = api.get(args.dump, {"page": 1, "per_page": args.page_size})
+        except ApiError as e:
+            sys.exit(f"ERROR: {e}")
+        print(json.dumps(data, indent=2)[:20000])
+        return
 
     if args.discover:
         discover(api, args.automation_id)
