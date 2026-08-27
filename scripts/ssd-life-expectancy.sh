@@ -18,7 +18,7 @@
 #
 set -uo pipefail
 
-VERSION="1.4.0"
+VERSION="1.5.0"
 SCRIPT_NAME="ssd-life-expectancy"
 
 # ---------------------------------------------------------------------------
@@ -484,6 +484,7 @@ SEEN_DEVS=""
 UNKNOWN_REASONS=()
 UNKNOWN_DUMPS=()
 HEURISTIC_NOTES=()
+OVERWORN_NOTES=()
 ROWS=()
 JSON_ITEMS=()
 SUMMARY_LINES=()
@@ -672,6 +673,32 @@ for RAW_DEV in $(discover_devices); do
                 "232:Endurance_Remaining:heuristic" "209:Remaining_Life:heuristic"; do
       aid="${pair%%:*}"; rest="${pair#*:}"; aname="${rest%%:*}"; atier="${rest##*:}"
       v="$(attr_norm "$aid")"
+
+      # A normalized life value above 100 is an unsigned-byte underflow, not a
+      # percentage: firmware computes 100 - percent_used, and once the drive
+      # passes its rated endurance that goes negative and wraps. Observed on a
+      # Crucial MX500 reporting VALUE=232 with RAW=124, i.e. 100-124 = -24,
+      # and -24 as an unsigned byte is 232. Such a drive has NO life left, so
+      # rejecting the value as out-of-range hid the most worn drive in the
+      # fleet behind UNKNOWN. Prefer the RAW percent-used, which stays correct
+      # past 100%, and fall back to zero when RAW is unusable.
+      if is_num "${v:-}" && [ "${v:-0}" -gt 100 ] 2>/dev/null; then
+        rawused="$(num "$(attr_raw "$aid")")"
+        if is_num "${rawused:-}" && [ "${rawused:-0}" -ge 100 ] 2>/dev/null \
+           && [ "${rawused:-999}" -le 255 ] 2>/dev/null; then
+          LIFE_USED="$rawused"; LIFE_REMAIN=0
+          LIFE_SOURCE="ata:${aid}_${aname}_raw_used"
+          LIFE_CONFIDENCE="$atier"
+          OVERWORN_NOTES+=("$DEV: attribute $aid reports ${rawused}% of rated endurance consumed (normalized ${v} is a wrapped negative) — the drive is past its rated life")
+          break
+        fi
+        # Normalized wrapped but RAW is not a usable percentage: still zero.
+        LIFE_USED=100; LIFE_REMAIN=0
+        LIFE_SOURCE="ata:${aid}_${aname}_wrapped"
+        LIFE_CONFIDENCE="$atier"
+        OVERWORN_NOTES+=("$DEV: attribute $aid normalized value ${v} is a wrapped negative — the drive is at or past its rated life")
+        break
+      fi
       # -ge 0, NOT -gt 0. A normalized value of 0 means ZERO life remaining -
       # a fully worn drive - not a missing attribute. is_num already rejects
       # the empty string returned when the attribute is absent, so treating 0
@@ -919,6 +946,11 @@ say "smartctl: $(smartctl --version 2>/dev/null | head -1 | sed 's/^smartctl //'
 say "$(printf '%-12s %-6s %-24s %-18s %6s  %8s  %-10s %s' DEVICE TYPE MODEL SERIAL LIFE EST_LEFT EOL_DATE STATUS)"
 say "------------------------------------------------------------------------------------------------------------"
 for l in "${SUMMARY_LINES[@]}"; do say "$l"; done
+if [ "${#OVERWORN_NOTES[@]}" -gt 0 ] && [ "$QUIET" != "true" ]; then
+  say ""
+  say "Past rated endurance:"
+  for o in "${OVERWORN_NOTES[@]}"; do say "  - $o"; done
+fi
 if [ "${#HEURISTIC_NOTES[@]}" -gt 0 ] && [ "$QUIET" != "true" ]; then
   say ""
   say "Readings marked ~ come from a vendor-specific attribute (life_confidence=heuristic):"
