@@ -50,6 +50,8 @@ fi
 # ===========================================================================
 
 say() { printf '%s\n' "$*"; }
+# Shell-quote a value for safe interpolation into a command line.
+shq() { printf "'%s'" "$(printf '%s' "${1:-}" | sed "s/'/'\\\\''/g")"; }
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 3; }
 
 [ "$(id -u)" -eq 0 ] || die "must run as root (Level.io runs scripts as root by default)"
@@ -116,7 +118,7 @@ CRIT_PCT="${SSD_CRIT_PCT:-10}"     # life remaining % -> CRITICAL at or below
 WARN_DAYS="${SSD_WARN_DAYS:-180}"  # projected days left -> WARN at or below
 CRIT_DAYS="${SSD_CRIT_DAYS:-60}"   # projected days left -> CRITICAL at or below
 
-CSV_HEADER="timestamp,asset_id,hostname,device,protocol,model,serial,firmware,capacity_gb,media_type,smart_status,life_remaining_pct,life_used_pct,life_source,available_spare_pct,power_on_hours,temperature_c,data_written_tb,error_count,wear_pct_per_year,est_days_remaining,est_eol_date,est_method,status"
+CSV_HEADER="timestamp,asset_id,hostname,device,protocol,model,serial,firmware,capacity_gb,media_type,smart_status,life_remaining_pct,life_used_pct,life_source,available_spare_pct,power_on_hours,temperature_c,data_written_tb,error_count,wear_pct_per_year,est_days_remaining,est_eol_date,est_method,status,life_confidence"
 
 # ---------------------------------------------------------------------------
 # Help
@@ -444,11 +446,21 @@ master_write() {
   _do_write() {
     # -s not -f: an existing but empty file still needs the header row.
     [ -s "$MASTER_PATH" ] || printf '%s\n' "$CSV_HEADER" > "$MASTER_PATH"
-    # Replace this machine+drive's previous row so the master stays one-row-per-drive.
+    # Replace this drive's previous row. The key is asset_id + SERIAL, not the
+    # device node: Linux can enumerate the same disk as /dev/sda today and
+    # /dev/sdb after a reboot or a controller change, and keying on the node
+    # would leave the old row behind as a phantom second drive. Fall back to
+    # the node only when the serial is unknown and cannot identify the drive.
     local tmp="${MASTER_PATH}.tmp.$$"
-    awk -F, -v h="$ASSET_ID" -v s="$serial" -v d="$dev" \
-        'NR==1 || !($2==h && $7==s && $4==d)' "$MASTER_PATH" > "$tmp" 2>/dev/null \
-        && mv -f "$tmp" "$MASTER_PATH" 2>/dev/null || rm -f "$tmp"
+    case "$serial" in
+      ''|unknown*|Unknown*|UNKNOWN*)
+        awk -F, -v h="$ASSET_ID" -v d="$dev" \
+            'NR==1 || !($2==h && $4==d)' "$MASTER_PATH" > "$tmp" 2>/dev/null ;;
+      *)
+        awk -F, -v h="$ASSET_ID" -v s="$serial" \
+            'NR==1 || !($2==h && $7==s)' "$MASTER_PATH" > "$tmp" 2>/dev/null ;;
+    esac
+    mv -f "$tmp" "$MASTER_PATH" 2>/dev/null || rm -f "$tmp"
     printf '%s\n' "$row" >> "$MASTER_PATH"
   }
 
@@ -515,6 +527,7 @@ BEST_DTYPE=""
 SEEN_DEVS=""
 UNKNOWN_REASONS=()
 UNKNOWN_DUMPS=()
+HEURISTIC_NOTES=()
 ROWS=()
 JSON_ITEMS=()
 SUMMARY_LINES=()
@@ -575,7 +588,13 @@ for RAW_DEV in $(discover_devices); do
   fi
 
   # The NVMe health log can go missing from "-a" for the same reason.
-  if [ "${PROTOCOL:-}" = "nvme" ] && ! printf '%s\n' "$SMART" | grep -qi 'Percentage Used'; then
+  # NOTE: detect NVMe inline here. PROTOCOL is not assigned until further down,
+  # so testing it at this point silently disabled this whole recovery path.
+  is_nvme_dev() {
+    case "$1" in */nvme*) return 0 ;; esac
+    printf '%s\n' "$SMART" | grep -qiE 'NVMe Version|Number of Namespaces|NVMe Log'
+  }
+  if is_nvme_dev "$DEV" && ! printf '%s\n' "$SMART" | grep -qi 'Percentage Used'; then
     SUPP="$(smartctl -A "$DEV" 2>/dev/null)"
     if printf '%s\n' "$SUPP" | grep -qi 'Percentage Used'; then
       SMART="$(printf '%s\n%s\n' "$SMART" "$SUPP")"
@@ -666,6 +685,7 @@ for RAW_DEV in $(discover_devices); do
 
   # --- life remaining --------------------------------------------------------
   LIFE_REMAIN=""; LIFE_USED=""; LIFE_SOURCE=""; SPARE=""; SPARE_THRESH=""
+  LIFE_CONFIDENCE=""
 
   if [ "$PROTOCOL" = "nvme" ]; then
     PU="$(num "$(sm_field 'Percentage Used')")"
@@ -673,16 +693,28 @@ for RAW_DEV in $(discover_devices); do
       LIFE_USED="$PU"
       LIFE_REMAIN="$(awk -v u="$PU" 'BEGIN{r=100-u; if(r<0)r=0; printf "%.0f", r}')"
       LIFE_SOURCE="nvme:percentage_used"
+      LIFE_CONFIDENCE="high"   # defined by the NVMe spec, not vendor-specific
     fi
     SPARE="$(num "$(sm_field 'Available Spare')")"
     SPARE_THRESH="$(num "$(sm_field 'Available Spare Threshold')")"
   else
-    # ATA/SATA SSDs: vendors disagree, so try the known life attributes in order.
-    # For these IDs the NORMALIZED value is percent-of-life-remaining.
-    for pair in "231:SSD_Life_Left" "233:Media_Wearout_Indicator" "202:Percent_Lifetime_Remain" \
-                "177:Wear_Leveling_Count" "173:Ave_Block_Erase_Count" "169:Remaining_Life" \
-                "232:Endurance_Remaining" "209:Remaining_Life"; do
-      aid="${pair%%:*}"; aname="${pair##*:}"
+    # ATA/SATA SSDs: vendors disagree about what these attributes mean, so they
+    # are split into two tiers and the tier is reported in life_confidence.
+    #
+    #   high      - the attribute is DEFINED as percent-of-life-remaining.
+    #   heuristic - the normalized value usually tracks remaining life on the
+    #               families that use it, but the vendor does not guarantee it.
+    #               Wear_Leveling_Count and Ave_Block-Erase_Count are erase-count
+    #               health indicators; a 0-100 normalized value is suggestive,
+    #               not a literal percentage. Treated as a signal, not a promise.
+    #
+    # High-confidence IDs are tried first, so a heuristic is only ever used when
+    # the drive exposes nothing authoritative.
+    for pair in "231:SSD_Life_Left:high" "233:Media_Wearout_Indicator:high" \
+                "202:Percent_Lifetime_Remain:high" "169:Remaining_Life:high" \
+                "177:Wear_Leveling_Count:heuristic" "173:Ave_Block-Erase_Count:heuristic" \
+                "232:Endurance_Remaining:heuristic" "209:Remaining_Life:heuristic"; do
+      aid="${pair%%:*}"; rest="${pair#*:}"; aname="${rest%%:*}"; atier="${rest##*:}"
       v="$(attr_norm "$aid")"
       # -ge 0, NOT -gt 0. A normalized value of 0 means ZERO life remaining -
       # a fully worn drive - not a missing attribute. is_num already rejects
@@ -692,6 +724,7 @@ for RAW_DEV in $(discover_devices); do
         LIFE_REMAIN="$v"
         LIFE_USED="$((100 - v))"
         LIFE_SOURCE="ata:${aid}_${aname}"
+        LIFE_CONFIDENCE="$atier"
         break
       fi
     done
@@ -703,6 +736,7 @@ $(printf '%s\n' "$ATTRS" | awk 'tolower($2) ~ /life|wear|lifetime|endurance|rema
 EOF_ATTR
       if is_num "${n_val:-}" && [ "${n_val:-x}" -ge 0 ] 2>/dev/null && [ "${n_val:-x}" -le 100 ] 2>/dev/null; then
         LIFE_REMAIN="$n_val"; LIFE_USED="$((100 - n_val))"; LIFE_SOURCE="ata:${n_id}_${n_name}"
+        LIFE_CONFIDENCE="heuristic"
       fi
     fi
     # Crucial/Micron style: 202 raw holds percent USED, not remaining.
@@ -710,6 +744,7 @@ EOF_ATTR
       v="$(num "$(attr_raw 202)")"
       if is_num "${v:-}" && [ "${v:-x}" -ge 0 ] 2>/dev/null && [ "${v:-x}" -le 100 ] 2>/dev/null; then
         LIFE_USED="$v"; LIFE_REMAIN="$((100 - v))"; LIFE_SOURCE="ata:202_raw_used"
+        LIFE_CONFIDENCE="heuristic"
       fi
     fi
   fi
@@ -849,7 +884,7 @@ EOF3
   esac
 
   # --- emit ------------------------------------------------------------------
-  ROW="$NOW_ISO,$(clean "$ASSET_ID"),$(clean "$HOST"),$(clean "$DEV"),$PROTOCOL,$(clean "$MODEL"),$(clean "$SERIAL"),$(clean "$FIRMWARE"),${CAPACITY_GB},$MEDIA,$(clean "$SMART_STATUS"),${LIFE_REMAIN},${LIFE_USED},${LIFE_SOURCE},${SPARE},${POH},${TEMP},${WRITTEN_TB},${ERRORS},${WEAR_YR},${EST_DAYS},${EST_EOL},${EST_METHOD},$STATUS"
+  ROW="$NOW_ISO,$(clean "$ASSET_ID"),$(clean "$HOST"),$(clean "$DEV"),$PROTOCOL,$(clean "$MODEL"),$(clean "$SERIAL"),$(clean "$FIRMWARE"),${CAPACITY_GB},$MEDIA,$(clean "$SMART_STATUS"),${LIFE_REMAIN},${LIFE_USED},${LIFE_SOURCE},${SPARE},${POH},${TEMP},${WRITTEN_TB},${ERRORS},${WEAR_YR},${EST_DAYS},${EST_EOL},${EST_METHOD},$STATUS,${LIFE_CONFIDENCE}"
   ROWS+=("$ROW")
 
   JSON_ITEMS+=("$(cat <<JSON
@@ -874,14 +909,18 @@ EOF3
       "est_days_remaining": ${EST_DAYS:-null},
       "est_eol_date": "$(json_escape "$EST_EOL")",
       "est_method": "$EST_METHOD",
-      "status": "$STATUS"
+      "status": "$STATUS",
+      "life_confidence": "$(json_escape "$LIFE_CONFIDENCE")"
     }
 JSON
 )")
 
-  SUMMARY_LINES+=("$(printf '%-12s %-6s %-24.24s %-18.18s %5s%%  %8s  %-10s %s' \
+  LIFE_MARK=""
+  [ "$LIFE_CONFIDENCE" = "heuristic" ] && LIFE_MARK="~"
+  SUMMARY_LINES+=("$(printf '%-12s %-6s %-24.24s %-18.18s %4s%s%%  %8s  %-10s %s' \
     "$(basename "$DEV")" "$MEDIA" "${MODEL:-unknown}" "${SERIAL:-unknown}" \
-    "${LIFE_REMAIN:-n/a}" "${EST_DAYS:-n/a}d" "${EST_EOL:-n/a}" "$STATUS${REASON:+ ($REASON)}")")
+    "${LIFE_REMAIN:-n/a}" "$LIFE_MARK" "${EST_DAYS:-n/a}d" "${EST_EOL:-n/a}" "$STATUS${REASON:+ ($REASON)}")")
+  [ "$LIFE_CONFIDENCE" = "heuristic" ] && HEURISTIC_NOTES+=("$DEV: read from ${LIFE_SOURCE#ata:} — a vendor-specific attribute, so treat the date as indicative, not a guarantee")
 done
 
 # ---------------------------------------------------------------------------
@@ -906,6 +945,11 @@ say "SSD Life Expectancy — $ASSET_ID ($HOST) — $NOW_ISO"
 say "$(printf '%-12s %-6s %-24s %-18s %6s  %8s  %-10s %s' DEVICE TYPE MODEL SERIAL LIFE EST_LEFT EOL_DATE STATUS)"
 say "------------------------------------------------------------------------------------------------------------"
 for l in "${SUMMARY_LINES[@]}"; do say "$l"; done
+if [ "${#HEURISTIC_NOTES[@]}" -gt 0 ] && [ "$QUIET" != "true" ]; then
+  say ""
+  say "Readings marked ~ come from a vendor-specific attribute (life_confidence=heuristic):"
+  for h in "${HEURISTIC_NOTES[@]}"; do say "  - $h"; done
+fi
 if [ "${#SKIPPED[@]}" -gt 0 ] && [ "$QUIET" != "true" ]; then
   say ""
   say "Skipped:"
@@ -1022,17 +1066,45 @@ say "    installed $(wc -l < "$SSD_INSTALL_PATH") lines"
 
 # --- 2. write the config the scheduled runs will read -----------------------
 say "==> Writing config to $SSD_CONF_PATH"
+
+# Emit NAME='value' with embedded single quotes escaped. Values reach this file
+# from Level.io variables, so they cannot be assumed free of spaces, #, $, or
+# quotes; an unquoted value would be re-split or expanded when the scheduled
+# run sources this file. Both `set -a; . file` and systemd EnvironmentFile
+# accept single-quoted values.
+conf_line() {
+  local name="$1" val="${2:-}"
+  printf "%s='%s'\n" "$name" "$(printf '%s' "$val" | sed "s/'/'\\\\''/g")"
+}
+
 {
   echo "# Written by install-ssd-monitor.sh. Read by the scheduled run."
-  echo "SSD_OUTPUT_MODE=$SSD_OUTPUT_MODE"
-  echo "SSD_LOCAL_DIR=$SSD_LOCAL_DIR"
-  echo "SSD_MASTER_PATH=$SSD_MASTER_PATH"
-  echo "SSD_STALE_LOCK_SECS=${SSD_STALE_LOCK_SECS:-300}"
-  echo "SSD_FORMAT=$SSD_FORMAT"
-  echo "SSD_WARN_PCT=$SSD_WARN_PCT"
-  echo "SSD_CRIT_PCT=$SSD_CRIT_PCT"
-  echo "SSD_WARN_DAYS=$SSD_WARN_DAYS"
-  echo "SSD_CRIT_DAYS=$SSD_CRIT_DAYS"
+  echo "# Values are single-quoted; edit with care."
+  # Everything the reporter honors, so a scheduled run behaves exactly like the
+  # install-time run. Persisting only a subset meant a Level.io variable applied
+  # now and silently vanished on the next timer firing.
+  conf_line SSD_OUTPUT_MODE      "$SSD_OUTPUT_MODE"
+  conf_line SSD_LOCAL_DIR        "$SSD_LOCAL_DIR"
+  conf_line SSD_LOCAL_NAME       "${SSD_LOCAL_NAME:-}"
+  conf_line SSD_MASTER_PATH      "$SSD_MASTER_PATH"
+  conf_line SSD_FORMAT           "$SSD_FORMAT"
+  conf_line SSD_APPEND_HISTORY   "${SSD_APPEND_HISTORY:-false}"
+  conf_line SSD_INCLUDE_HDD      "${SSD_INCLUDE_HDD:-false}"
+  conf_line SSD_DEVICES          "${SSD_DEVICES:-}"
+  conf_line SSD_HOSTNAME         "${SSD_HOSTNAME:-}"
+  conf_line SSD_HOST_REGEX       "${SSD_HOST_REGEX:-}"
+  conf_line SSD_WARN_PCT         "$SSD_WARN_PCT"
+  conf_line SSD_CRIT_PCT         "$SSD_CRIT_PCT"
+  conf_line SSD_WARN_DAYS        "$SSD_WARN_DAYS"
+  conf_line SSD_CRIT_DAYS        "$SSD_CRIT_DAYS"
+  conf_line SSD_AUTO_INSTALL     "${SSD_AUTO_INSTALL:-true}"
+  conf_line SSD_ENABLE_SMART     "${SSD_ENABLE_SMART:-true}"
+  conf_line SSD_UNKNOWN_IS_WARN  "${SSD_UNKNOWN_IS_WARN:-true}"
+  conf_line SSD_STATE_FILE       "${SSD_STATE_FILE:-/var/lib/ssd-life-expectancy/state.csv}"
+  conf_line SSD_LOCK_TIMEOUT     "${SSD_LOCK_TIMEOUT:-30}"
+  conf_line SSD_LOCK_STRATEGY    "${SSD_LOCK_STRATEGY:-auto}"
+  conf_line SSD_STALE_LOCK_SECS  "${SSD_STALE_LOCK_SECS:-300}"
+  conf_line SSD_QUIET            "${SSD_QUIET:-false}"
 } > "$SSD_CONF_PATH"
 chmod 0644 "$SSD_CONF_PATH"
 
@@ -1069,7 +1141,7 @@ After=local-fs.target
 [Service]
 Type=oneshot
 EnvironmentFile=-$SSD_CONF_PATH
-ExecStart=$SSD_INSTALL_PATH
+ExecStart=$(shq "$SSD_INSTALL_PATH")
 # The reporter exits 1/2 to signal WARN/CRITICAL; that is data, not a failure.
 SuccessExitStatus=0 1 2
 SERVICE
@@ -1096,12 +1168,20 @@ install_cron() {
   local dow="*"
   [ "$SSD_SCHEDULE" = "weekly" ] && dow="0"
   # set -a exports what the conf file defines, so the reporter inherits it.
+  # Single-quote every interpolated path, and escape cron's % (which it would
+  # otherwise turn into a newline) so unusual paths cannot break the crontab.
+  local q_conf q_bin q_log
+  q_conf="$(shq "$SSD_CONF_PATH")"
+  q_bin="$(shq "$SSD_INSTALL_PATH")"
+  q_log="$(shq "$SSD_LOCAL_DIR/scheduled-run.log")"
   cat > /etc/cron.d/ssd-life-expectancy <<CRON
 # SSD life expectancy report — installed by install-ssd-monitor.sh
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-$SCHED_MIN $SCHED_HOUR * * $dow root set -a; . $SSD_CONF_PATH 2>/dev/null; set +a; $SSD_INSTALL_PATH >> $SSD_LOCAL_DIR/scheduled-run.log 2>&1
+$SCHED_MIN $SCHED_HOUR * * $dow root set -a; . $q_conf 2>/dev/null; set +a; $q_bin >> $q_log 2>&1
 CRON
+  # cron treats an unescaped % as a newline in the command field.
+  sed -i 's/%/\\%/g' /etc/cron.d/ssd-life-expectancy
   chmod 0644 /etc/cron.d/ssd-life-expectancy
   mkdir -p "$SSD_LOCAL_DIR"
   return 0
@@ -1127,7 +1207,10 @@ RC=0
 if [ "$SSD_RUN_NOW" = "true" ]; then
   say "==> Running now"
   say ""
-  set -a; . "$SSD_CONF_PATH" 2>/dev/null; set +a
+  set -a
+  # shellcheck disable=SC1090
+  . "$SSD_CONF_PATH" 2>/dev/null
+  set +a
   "$SSD_INSTALL_PATH"
   RC=$?
   say ""

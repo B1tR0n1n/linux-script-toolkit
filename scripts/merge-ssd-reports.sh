@@ -26,7 +26,7 @@ done
 
 [ -d "$IN_DIR" ] || { echo "ERROR: input dir not found: $IN_DIR" >&2; exit 2; }
 
-HEADER="timestamp,asset_id,hostname,device,protocol,model,serial,firmware,capacity_gb,media_type,smart_status,life_remaining_pct,life_used_pct,life_source,available_spare_pct,power_on_hours,temperature_c,data_written_tb,error_count,wear_pct_per_year,est_days_remaining,est_eol_date,est_method,status"
+HEADER="timestamp,asset_id,hostname,device,protocol,model,serial,firmware,capacity_gb,media_type,smart_status,life_remaining_pct,life_used_pct,life_source,available_spare_pct,power_on_hours,temperature_c,data_written_tb,error_count,wear_pct_per_year,est_days_remaining,est_eol_date,est_method,status,life_confidence"
 
 TMP="$(mktemp)"; trap 'rm -f "$TMP"' EXIT
 
@@ -40,7 +40,9 @@ done < <(find "$IN_DIR" -type f -name '*.csv' ! -name "$(basename "$OUT")" 2>/de
 [ "$count" -gt 0 ] || { echo "ERROR: no CSV files found under $IN_DIR" >&2; exit 2; }
 
 # Keep only the newest row per asset+serial+device (col 2,7,4), then order output.
-DEDUPED="$(sort -t, -k1,1r "$TMP" | awk -F, '!seen[$2","$7","$4]++')"
+# Key on asset_id + serial so a drive that moved from sda to sdb is one drive,
+# falling back to the device node only when the serial is unknown.
+DEDUPED="$(sort -t, -k1,1r "$TMP" | awk -F, '{k=($7=="" || $7 ~ /^[Uu]nknown/) ? $2","$4 : $2","$7} !seen[k]++')"
 
 {
   printf '%s\n' "$HEADER"
