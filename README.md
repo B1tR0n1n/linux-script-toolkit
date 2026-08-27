@@ -210,7 +210,22 @@ Triggered 900 run(s)
   WARN:     117
 ```
 
-Add a **webhook trigger** to the automation in Level to get the token. `--all-devices`
+Find the token with `--list-webhooks`, which reads
+`GET /v2/automations/webhooks` and prints the `--trigger-token` argument for each
+automation:
+
+```
+25 webhook(s):
+
+  SSD Life Expectancy  —  SSD webhook
+    group:      Linux Devices
+    parameters: device_ids, email
+    auth req'd: True   (your API key must be write-enabled)
+    --trigger-token tok_ssdlife
+```
+
+The token is not a field of its own — it is the last path segment of the webhook `url`.
+If nothing is listed, add a **Webhook trigger** to the automation in Level to create one. `--all-devices`
 triggers every device the API lists; `--device-ids-file` restricts it; omit both and the
 webhook's own conditions decide. `--wait` (default 900s) bounds how long to wait for runs
 to finish, and runs still going when it expires are reported rather than silently dropped.

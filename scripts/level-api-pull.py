@@ -137,21 +137,38 @@ def walk_runs(api, list_path, automation_id, page_size, max_pages, verbose):
 TERMINAL = {"success", "warning", "error", "canceled"}
 
 def all_pages(api, path, page_size=100, max_pages=200, verbose=False):
-    """Walk a {data, has_more} collection."""
-    items, page = [], 1
-    while page <= max_pages:
-        d = api.get(path, {"page": page, "per_page": page_size})
+    """Walk a {data, has_more} collection.
+
+    These endpoints paginate by cursor - `limit` plus `starting_after=<last
+    id>` - not by page number. Sending page/per_page is silently ignored, so
+    every request returns the same first records and the walk never advances;
+    seen-ids guards against that regardless of what the server does.
+    """
+    items, seen, cursor, pages = [], set(), None, 0
+    limit = max(1, min(100, page_size))       # documented range is 1..100
+    while pages < max_pages:
+        params = {"limit": limit}
+        if cursor:
+            params["starting_after"] = cursor
+        d = api.get(path, params)
         batch = d.get("data") if isinstance(d, dict) else d
         if not batch:
             break
-        items.extend(batch)
+        fresh = [r for r in batch
+                 if not (isinstance(r, dict) and r.get("id") in seen)]
+        for r in batch:
+            if isinstance(r, dict) and r.get("id"):
+                seen.add(r["id"])
+        items.extend(fresh)
+        pages += 1
         if verbose:
-            print(f"  {path} page {page}: {len(batch)}", file=sys.stderr)
-        if isinstance(d, dict) and not d.get("has_more"):
+            print(f"  {path} page {pages}: {len(batch)} ({len(fresh)} new)", file=sys.stderr)
+        if not fresh:
+            break                              # cursor is not advancing; stop
+        last = batch[-1]
+        cursor = last.get("id") if isinstance(last, dict) else None
+        if not cursor or (isinstance(d, dict) and not d.get("has_more")):
             break
-        if len(batch) < page_size:
-            break
-        page += 1
     return items
 
 def trigger_runs(api, token, device_ids, verbose):
@@ -210,49 +227,50 @@ def id_variants(raw):
         pass
     return out
 
-def list_webhooks(api):
-    """Find existing automation webhooks and show their tokens.
+def webhook_token(url):
+    """The trigger token is the last path segment of the webhook url."""
+    if not url:
+        return None
+    return url.rstrip("/").rsplit("/", 1)[-1] or None
 
-    The trigger endpoint takes a webhook token, which is otherwise only
-    visible in the UI when the webhook is created. The docs list a
-    "List automation webhooks" endpoint but not its path, so try the
-    plausible ones.
+def list_webhooks(api, page_size=100, verbose=False):
+    """Show automation webhooks and the --trigger-token to use for each.
+
+    GET /v2/automations/webhooks returns non-archived automations' webhook
+    trigger URLs. The token is not its own field - it is the last segment of
+    `url` - and `requires_authorization_header` says whether triggering needs
+    the API key, which must be write-enabled.
     """
-    paths = [
-        "/v2/automations/webhooks",
-        "/v2/automation-webhooks",
-        "/v2/automation_webhooks",
-        "/v2/webhooks",
-    ]
-    for path in paths:
-        try:
-            data = api.get(path, {"page": 1, "per_page": 100})
-        except ApiError as e:
-            first = str(e).splitlines()[0]
-            code = first.split()[1] if first.startswith("HTTP") else "err"
-            print(f"  {code:<5}  {path}")
-            continue
-        items = data.get("data") if isinstance(data, dict) else data
-        print(f"  {'200':<5}  {path}")
-        if not isinstance(items, list) or not items:
-            print("         (responded, but no webhooks listed)")
-            continue
-        print()
-        for w in items:
-            if not isinstance(w, dict):
-                continue
-            tok = next((w[k] for k in ("token", "webhook_token", "key", "id") if w.get(k)), None)
-            name = w.get("name") or w.get("automation_name") or ""
-            print(f"    {name}")
-            for k in sorted(w):
-                print(f"      {k} = {w[k]!r}")
-            if tok:
-                print(f"      -> use: --trigger-token {tok}")
-            print()
+    try:
+        hooks = all_pages(api, "/v2/automations/webhooks", page_size, 50, verbose)
+    except ApiError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        print("\nIf this 404s, create a webhook trigger on the automation in Level;",
+              file=sys.stderr)
+        print("the token is the last path segment of the URL it shows you.", file=sys.stderr)
         return
-    print("\nNo webhook list endpoint responded. Create a webhook trigger on the")
-    print("automation in Level; the token is the last path segment of the URL it shows:")
-    print("  https://api.level.io/v2/automations/webhooks/<TOKEN>")
+    if not hooks:
+        print("No webhooks found. Add a Webhook trigger to your SSD automation in Level.")
+        return
+    print(f"{len(hooks)} webhook(s):\n")
+    for w in hooks:
+        if not isinstance(w, dict):
+            continue
+        tok = webhook_token(w.get("url"))
+        print(f"  {w.get('automation_name') or '(unnamed automation)'}"
+              f"  —  {w.get('name') or '(unnamed webhook)'}")
+        if w.get("group_name"):
+            print(f"    group:      {w['group_name']}")
+        if w.get("parameters"):
+            print(f"    parameters: {', '.join(w['parameters'])}")
+        print(f"    auth req'd: {w.get('requires_authorization_header')}"
+              + ("   (your API key must be write-enabled)"
+                 if w.get("requires_authorization_header") else ""))
+        if tok:
+            print(f"    --trigger-token {tok}")
+        else:
+            print(f"    url: {w.get('url')!r}  (could not read a token from it)")
+        print()
 
 def discover(api, automation_id):
     """Probe candidate endpoints and report what the account can actually see.
@@ -357,7 +375,7 @@ def main():
     api = Level(key, args.base, args.verbose, args.insecure)
 
     if args.list_webhooks:
-        list_webhooks(api)
+        list_webhooks(api, args.page_size, args.verbose)
         return
 
     if args.dump:
