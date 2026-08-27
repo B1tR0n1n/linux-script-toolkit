@@ -64,7 +64,7 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 3; }
 [ "$(id -u)" -eq 0 ] || die "must run as root (Level.io runs scripts as root by default)"
 
 # --- 1. install the reporter ------------------------------------------------
-say "==> install-ssd-monitor build 1.5.0"
+say "==> install-ssd-monitor build 1.6.0"
 say "==> Installing reporter to $SSD_INSTALL_PATH"
 mkdir -p "$(dirname "$SSD_INSTALL_PATH")" || die "cannot create $(dirname "$SSD_INSTALL_PATH")"
 

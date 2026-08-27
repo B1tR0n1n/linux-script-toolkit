@@ -18,7 +18,7 @@
 #
 set -uo pipefail
 
-VERSION="1.5.0"
+VERSION="1.6.0"
 SCRIPT_NAME="ssd-life-expectancy"
 
 # ---------------------------------------------------------------------------
@@ -36,7 +36,11 @@ STATE_FILE="${SSD_STATE_FILE:-/var/lib/ssd-life-expectancy/state.csv}"
 # NOTE: assigned in two steps on purpose — ${VAR:-default} truncates a default
 # containing "}" (bash ends the expansion at the first one), which silently
 # mangled this regex and broke asset-id extraction.
-HOST_REGEX_DEFAULT='[A-Za-z]{2,6}-?[0-9]{2,6}'                  # matches md-4004 AND md4065
+# Matches md-4004, md4065, and md4060H. The trailing letter is optional but
+# captured when present: hostnames in a fleet often carry a suffix (H for
+# hardened, h, R, etc.) that distinguishes one machine from another, and
+# dropping it filed md4060H under "md4060" - a name that matches no device.
+HOST_REGEX_DEFAULT='[A-Za-z]{2,6}-?[0-9]{2,6}[A-Za-z]?'
 HOST_REGEX="${SSD_HOST_REGEX:-}"
 [ -n "$HOST_REGEX" ] || HOST_REGEX="$HOST_REGEX_DEFAULT"
 HOSTNAME_OVERRIDE="${SSD_HOSTNAME:-}"
@@ -223,6 +227,15 @@ HOST="${HOST:-unknown-host}"
 
 # Pull the asset tag out of the hostname (md-4004 from md-4004.corp.local etc).
 ASSET_ID="$(printf '%s' "$HOST" | grep -oE "$HOST_REGEX" | head -1)"
+# Only accept a match anchored at the start of the hostname. An unanchored
+# match can land mid-string and mangle a name that does not fit the
+# convention - RQAW-PF3CPW00 matched "CPW00" - which would file a machine
+# under an identifier belonging to nothing. Anything else falls back to the
+# full hostname, so an unusual name is reported verbatim rather than wrongly.
+case "$HOST" in
+  "$ASSET_ID"*) : ;;
+  *) ASSET_ID="" ;;
+esac
 [ -n "$ASSET_ID" ] || ASSET_ID="$HOST"
 
 NOW_EPOCH="$(date -u +%s)"
