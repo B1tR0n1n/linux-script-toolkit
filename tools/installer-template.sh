@@ -70,6 +70,30 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 3; }
 
 [ "$(id -u)" -eq 0 ] || die "must run as root (Level.io runs scripts as root by default)"
 
+# --- 0. ssh client, only if pushing ---------------------------------------
+# scp ships with openssh-client and is present on essentially every Linux
+# install, but at fleet scale "essentially every" means a handful without it,
+# and those would silently never report. Install it rather than skip them.
+if [ -n "$SSD_PUSH_TARGET" ] && ! command -v scp >/dev/null 2>&1; then
+  say "==> scp missing but SSD_PUSH_TARGET is set — installing openssh-client"
+  if   command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-client >/dev/null 2>&1
+  elif command -v dnf     >/dev/null 2>&1; then dnf install -y -q openssh-clients >/dev/null 2>&1
+  elif command -v yum     >/dev/null 2>&1; then yum install -y -q openssh-clients >/dev/null 2>&1
+  elif command -v zypper  >/dev/null 2>&1; then zypper --non-interactive --quiet install openssh >/dev/null 2>&1
+  elif command -v pacman  >/dev/null 2>&1; then pacman -Sy --noconfirm openssh >/dev/null 2>&1
+  elif command -v apk     >/dev/null 2>&1; then apk add --quiet openssh-client >/dev/null 2>&1
+  fi
+  if command -v scp >/dev/null 2>&1; then
+    say "    installed $(ssh -V 2>&1 | head -1)"
+  else
+    say "    WARNING: could not install an ssh client. This machine will report"
+    say "             locally but will not push, so it will be missing from the"
+    say "             fleet file. Install openssh-client here manually."
+  fi
+fi
+
 # --- 1. install the reporter ------------------------------------------------
 say "==> install-ssd-monitor build 1.7.0"
 say "==> Installing reporter to $SSD_INSTALL_PATH"
