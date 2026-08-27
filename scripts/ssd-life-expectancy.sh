@@ -623,7 +623,11 @@ for RAW_DEV in $(discover_devices); do
                 "232:Endurance_Remaining" "209:Remaining_Life"; do
       aid="${pair%%:*}"; aname="${pair##*:}"
       v="$(attr_norm "$aid")"
-      if is_num "${v:-}" && [ "${v:-0}" -gt 0 ] 2>/dev/null && [ "${v:-0}" -le 100 ] 2>/dev/null; then
+      # -ge 0, NOT -gt 0. A normalized value of 0 means ZERO life remaining -
+      # a fully worn drive - not a missing attribute. is_num already rejects
+      # the empty string returned when the attribute is absent, so treating 0
+      # as "not found" only ever hid the drives that most needed replacing.
+      if is_num "${v:-}" && [ "${v:-x}" -ge 0 ] 2>/dev/null && [ "${v:-x}" -le 100 ] 2>/dev/null; then
         LIFE_REMAIN="$v"
         LIFE_USED="$((100 - v))"
         LIFE_SOURCE="ata:${aid}_${aname}"
@@ -636,14 +640,14 @@ for RAW_DEV in $(discover_devices); do
       read -r n_id n_name n_val <<EOF_ATTR
 $(printf '%s\n' "$ATTRS" | awk 'tolower($2) ~ /life|wear|lifetime|endurance|remain/ && NF>=8 {print $1" "$2" "$4+0; exit}')
 EOF_ATTR
-      if is_num "${n_val:-}" && [ "${n_val:-0}" -gt 0 ] 2>/dev/null && [ "${n_val:-101}" -le 100 ] 2>/dev/null; then
+      if is_num "${n_val:-}" && [ "${n_val:-x}" -ge 0 ] 2>/dev/null && [ "${n_val:-x}" -le 100 ] 2>/dev/null; then
         LIFE_REMAIN="$n_val"; LIFE_USED="$((100 - n_val))"; LIFE_SOURCE="ata:${n_id}_${n_name}"
       fi
     fi
     # Crucial/Micron style: 202 raw holds percent USED, not remaining.
     if [ -z "$LIFE_REMAIN" ]; then
       v="$(num "$(attr_raw 202)")"
-      if is_num "${v:-}" && [ "${v:-101}" -le 100 ] 2>/dev/null; then
+      if is_num "${v:-}" && [ "${v:-x}" -ge 0 ] 2>/dev/null && [ "${v:-x}" -le 100 ] 2>/dev/null; then
         LIFE_USED="$v"; LIFE_REMAIN="$((100 - v))"; LIFE_SOURCE="ata:202_raw_used"
       fi
     fi
