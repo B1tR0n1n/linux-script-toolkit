@@ -61,6 +61,7 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 3; }
 [ "$(id -u)" -eq 0 ] || die "must run as root (Level.io runs scripts as root by default)"
 
 # --- 1. install the reporter ------------------------------------------------
+say "==> install-ssd-monitor build 1.4.0"
 say "==> Installing reporter to $SSD_INSTALL_PATH"
 mkdir -p "$(dirname "$SSD_INSTALL_PATH")" || die "cannot create $(dirname "$SSD_INSTALL_PATH")"
 
@@ -85,7 +86,7 @@ cat > "$SSD_INSTALL_PATH" <<'SSD_REPORTER_PAYLOAD_EOF'
 #
 set -uo pipefail
 
-VERSION="1.1.0"
+VERSION="1.4.0"
 SCRIPT_NAME="ssd-life-expectancy"
 
 # ---------------------------------------------------------------------------
@@ -952,7 +953,10 @@ fi
 # ---------------------------------------------------------------------------
 # Human-readable summary (this is what shows up in the Level.io run output)
 # ---------------------------------------------------------------------------
-say "SSD Life Expectancy — $ASSET_ID ($HOST) — $NOW_ISO"
+# Version in the header so a pasted run identifies its own build - otherwise
+# an old copy still deployed is indistinguishable from a bug in the new one.
+say "SSD Life Expectancy v$VERSION — $ASSET_ID ($HOST) — $NOW_ISO"
+say "smartctl: $(smartctl --version 2>/dev/null | head -1 | sed 's/^smartctl //')"
 say "$(printf '%-12s %-6s %-24s %-18s %6s  %8s  %-10s %s' DEVICE TYPE MODEL SERIAL LIFE EST_LEFT EOL_DATE STATUS)"
 say "------------------------------------------------------------------------------------------------------------"
 for l in "${SUMMARY_LINES[@]}"; do say "$l"; done
