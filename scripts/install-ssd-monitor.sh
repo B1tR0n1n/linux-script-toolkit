@@ -307,10 +307,21 @@ sm_field() {
 
 # Just the ATA attribute table rows.
 attr_table() {
+  local out
+  # Preferred: everything between the header row and the next blank line.
+  out="$(printf '%s\n' "$SMART" | awk '
+    /^[[:space:]]*ID#[[:space:]]+ATTRIBUTE_NAME/ { f=1; next }
+    f && /^[[:space:]]*$/                        { f=0 }
+    f                                            { print }')"
+  if [ -n "$out" ]; then printf '%s' "$out"; return 0; fi
+
+  # Fallback: recognize attribute rows by their shape, with no header at all.
+  # An ATA attribute row is:  <id> <name> <0xflag> <val> <worst> <thresh> ...
+  # This survives header wording/spacing differences across smartctl versions.
   printf '%s\n' "$SMART" | awk '
-    /^ID#[[:space:]]+ATTRIBUTE_NAME/ { f=1; next }
-    f && /^[[:space:]]*$/            { f=0 }
-    f                                 { print }'
+    $1 ~ /^[0-9]+$/ && $1+0 >= 1 && $1+0 <= 255 &&
+    $3 ~ /^0x[0-9a-fA-F]+$/ &&
+    $4 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ && $6 ~ /^[0-9]+$/ { print }'
 }
 
 # Normalized VALUE column (col 4) for an ATA attribute id.
@@ -503,6 +514,7 @@ master_write() {
 BEST_DTYPE=""
 SEEN_DEVS=""
 UNKNOWN_REASONS=()
+UNKNOWN_DUMPS=()
 ROWS=()
 JSON_ITEMS=()
 SUMMARY_LINES=()
@@ -534,6 +546,7 @@ for RAW_DEV in $(discover_devices); do
   [ -n "$BEST_DTYPE" ] || BEST_DTYPE="default"
 
   SUPPLEMENTED=""
+  SUPP_RAW=""
   ATTRS="$(attr_table)"
 
   # "-a" is documented as a superset of "-A", but on some smartctl/drive
@@ -547,10 +560,17 @@ for RAW_DEV in $(discover_devices); do
       # shellcheck disable=SC2086
       SUPP="$(smartctl -A $BEST_DTYPE "$DEV" 2>/dev/null)"
     fi
-    if [ -n "$SUPP" ] && printf '%s\n' "$SUPP" | grep -qE '^ID#[[:space:]]+ATTRIBUTE_NAME'; then
+    if [ -n "$SUPP" ]; then
+      SMART_TRY="$SMART"
       SMART="$(printf '%s\n%s\n' "$SMART" "$SUPP")"
-      ATTRS="$(attr_table)"
-      SUPPLEMENTED="smartctl -A"
+      if [ -n "$(attr_table)" ]; then
+        ATTRS="$(attr_table)"
+        SUPPLEMENTED="smartctl -A"
+      else
+        SMART="$SMART_TRY"
+        # Keep what -A said so an UNKNOWN drive can explain itself below.
+        SUPP_RAW="$SUPP"
+      fi
     fi
   fi
 
@@ -778,7 +798,19 @@ EOF3
       elif printf '%s\n' "$SMART" | grep -qi 'SMART support is:[[:space:]]*Unavailable\|does not support SMART'; then
         REASON="drive/controller does not support SMART"
       else
-        REASON="no attribute table returned (best probe: smartctl -a ${BEST_DTYPE} )"
+        REASON="no attribute table returned (best probe: smartctl -a ${BEST_DTYPE})"
+        # Show what smartctl actually said, so this is diagnosable from the
+        # normal Level.io output instead of needing a second --debug run.
+        UNKNOWN_DUMPS+=("--- $DEV: 'smartctl -A' returned ---")
+        if [ -n "${SUPP_RAW:-}" ]; then
+          while IFS= read -r dl; do UNKNOWN_DUMPS+=("    $dl"); done \
+            <<< "$(printf '%s\n' "$SUPP_RAW" | grep -v '^[[:space:]]*$' | head -20)"
+        else
+          UNKNOWN_DUMPS+=("    (no output at all)")
+        fi
+        UNKNOWN_DUMPS+=("--- $DEV: 'smartctl -a' returned ---")
+        while IFS= read -r dl; do UNKNOWN_DUMPS+=("    $dl"); done \
+          <<< "$(printf '%s\n' "$SMART" | grep -v '^[[:space:]]*$' | head -20)"
       fi
     else
       ATTR_IDS="$(printf '%s\n' "$ATTRS" | awk '{printf "%s ", $1}')"
@@ -880,7 +912,11 @@ HEALTHY=$((FOUND - UNKNOWN_COUNT))
 if [ "$UNKNOWN_COUNT" -gt 0 ]; then
   say "NOTE: $UNKNOWN_COUNT of $FOUND drive(s) exposed no wear attribute — health is UNKNOWN, not OK."
   for r in "${UNKNOWN_REASONS[@]}"; do say "      $r"; done
-  say "      For the full SMART dump, re-run with SSD_DEBUG=true (or --debug)."
+  if [ "${#UNKNOWN_DUMPS[@]}" -gt 0 ]; then
+    say ""
+    say "What smartctl actually returned (send this if the drive should be readable):"
+    for d in "${UNKNOWN_DUMPS[@]}"; do say "$d"; done
+  fi
 fi
 case "$WORST" in
   0) if [ "$UNKNOWN_COUNT" -gt 0 ]; then
