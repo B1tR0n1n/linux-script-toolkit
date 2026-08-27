@@ -35,13 +35,23 @@ projects **how long the drive has left**, and reports it as a table, CSV, and/or
 
 ### What it measures
 
-| Drive type | Source of "life remaining" |
-| --- | --- |
-| NVMe | `Percentage Used` (100 − used), plus `Available Spare` vs its threshold |
-| SATA/SAS SSD | First available vendor attribute: `231 SSD_Life_Left`, `233 Media_Wearout_Indicator`, `202 Percent_Lifetime_Remain`, `177 Wear_Leveling_Count`, `173 Ave_Block_Erase_Count`, `169 Remaining_Life` |
+| Drive type | Source of "life remaining" | Confidence |
+| --- | --- | --- |
+| NVMe | `Percentage Used` (100 − used), plus `Available Spare` vs threshold | `high` — defined by the NVMe spec |
+| SATA/SAS | `231 SSD_Life_Left`, `233 Media_Wearout_Indicator`, `202 Percent_Lifetime_Remain`, `169 Remaining_Life` | `high` — defined as percent-of-life-remaining |
+| SATA/SAS | `177 Wear_Leveling_Count`, `173 Ave_Block-Erase_Count`, `232 Endurance_Remaining`, `209` | `heuristic` — see below |
 
-Vendors disagree wildly on which attribute means what, so the CSV records a `life_source`
-column telling you exactly which attribute produced the number.
+### Read `life_confidence` before acting on `est_eol_date`
+
+SMART vendor attributes are exactly that — vendor-specific. High-confidence IDs are *defined* as
+percent-of-life-remaining and are always tried first. The heuristic tier holds erase-count health
+indicators whose normalized value usually tracks remaining life on the families that use them, but
+no vendor guarantees it: a value between 0 and 100 is suggestive, not a literal percentage.
+
+A drive read from the heuristic tier is marked `~` in the console table, called out in a note below
+it, and carries `life_confidence=heuristic` in the CSV and JSON. **Treat its `est_eol_date` as
+indicative, not as a replacement signal** — a believable-but-wrong date is worse than `UNKNOWN`.
+The `life_source` column always names the exact attribute used, so any reading can be audited.
 
 ### How the projection works
 
@@ -182,7 +192,11 @@ RESULT: WARN — at least one drive is wearing out (2 scanned)
 `timestamp, asset_id, hostname, device, protocol, model, serial, firmware, capacity_gb,
 media_type, smart_status, life_remaining_pct, life_used_pct, life_source, available_spare_pct,
 power_on_hours, temperature_c, data_written_tb, error_count, wear_pct_per_year,
-est_days_remaining, est_eol_date, est_method, status`
+est_days_remaining, est_eol_date, est_method, status, life_confidence`
+
+Rows in the master file are keyed on **asset_id + serial**, not the device node, so a disk that
+Linux enumerates as `/dev/sda` today and `/dev/sdb` after a reboot stays one row instead of
+becoming a phantom second drive. The node is the key only when the serial is unreadable.
 
 Drops straight into Excel or Google Sheets — sort by `life_remaining_pct` ascending to get your
 replacement queue.
@@ -252,6 +266,10 @@ sudo ./scripts/ssd-life-expectancy.sh --output-mode none --emit-csv --quiet
   same disk are only reported once.
 - **Hardware RAID** hides member drives. Point at them explicitly, e.g.
   `--devices "/dev/bus/0"` with a controller-aware smartctl type.
+- **Scheduled runs get the full config.** The installer persists every reporter variable to
+  `/etc/ssd-life-expectancy.conf`, single-quoted and escaped, so a Level.io variable set at install
+  time still applies when the timer fires next Sunday. Paths containing spaces, `#`, `$`, or quotes
+  round-trip correctly, in both the config file and the generated cron line.
 - **Drives that expose no wear attribute** are reported as `UNKNOWN` and count as **WARN**, never
   as healthy — a drive you cannot read is not a drive you know is fine. Pass `--unknown-ok` if you
   would rather they stay silent. Check the `life_source` column to see which attribute was used.
