@@ -6,7 +6,8 @@ Operational Linux scripts for fleet management via [Level.io](https://level.io) 
 | --- | --- |
 | [`scripts/install-ssd-monitor.sh`](scripts/install-ssd-monitor.sh) | **Start here.** One paste: installs deps, installs the reporter, schedules it weekly, runs it now. |
 | [`scripts/ssd-life-expectancy.sh`](scripts/ssd-life-expectancy.sh) | The reporter itself. Run it directly if you don't want anything installed. |
-| [`scripts/collect-ssd-output.sh`](scripts/collect-ssd-output.sh) | Build a fleet master CSV from emitted output — paste Level.io run history straight in. |
+| [`scripts/collect-ssd-output.sh`](scripts/collect-ssd-output.sh) | Build a fleet master CSV from report output you already have (paste Level.io run history in). No SSH. |
+| [`scripts/pull-ssd-reports.sh`](scripts/pull-ssd-reports.sh) | SSH to each machine, fetch its report file, and build the fleet master CSV. |
 | [`scripts/merge-ssd-reports.sh`](scripts/merge-ssd-reports.sh) | Roll individual per-machine CSV files into one master file. |
 
 ## Quick start — the whole thing in one paste
@@ -172,6 +173,14 @@ the local files later and merge them:
 ./scripts/merge-ssd-reports.sh -i ./collected -o fleet-ssd-master.csv --sort-by-life
 ```
 
+### Three ways to get one fleet CSV — pick by what you have
+
+| You have | Use | Needs |
+| --- | --- | --- |
+| A shared mount every machine can write to | `SSD_MASTER_PATH` in the installer | NFS/CIFS mount |
+| Report output in the RMM (Level.io run history) | `collect-ssd-output.sh` | nothing |
+| SSH access to the machines | `pull-ssd-reports.sh` | ssh + scp |
+
 ### collect-ssd-output.sh
 
 Takes emitted report rows out of whatever surrounds them. Level.io wraps every
@@ -190,6 +199,24 @@ It keeps the newest row per physical drive (asset_id + serial, same key the repo
 uses), sorts worst-drive-first by default — `--by-asset` or `--by-date` to change —
 and prints a replacement queue. Drives with no reading sort last rather than as 0%.
 Exits 2 if anything is CRITICAL, 1 for WARN, 0 otherwise.
+
+### pull-ssd-reports.sh
+
+Goes and gets the files instead of waiting for you to paste them. SSHes to each host,
+copies `/var/log/ssd-health/*_ssd-health.csv`, then hands everything to
+`collect-ssd-output.sh` for the same dedupe and sort.
+
+```bash
+./scripts/pull-ssd-reports.sh -H hosts.txt -o fleet-ssd-master.csv
+./scripts/pull-ssd-reports.sh md4004 md4006 md4065        # hosts inline
+./scripts/pull-ssd-reports.sh -H hosts.txt -u svcacct     # a specific ssh user
+./scripts/pull-ssd-reports.sh -H hosts.txt --run          # re-run the reporter first, then pull
+```
+
+The host file is one name per line; blanks and `#` comments are ignored. Transfers run
+8 at a time (`-j`), and hosts that cannot be reached or have no report are listed with
+the reason rather than silently dropped — a machine missing from the master file is
+the kind of gap that hides a dying drive.
 
 ### 3. Create the automation
 
