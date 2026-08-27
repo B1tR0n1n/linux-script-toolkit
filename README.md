@@ -216,6 +216,9 @@ sudo ./scripts/ssd-life-expectancy.sh --output-mode none --emit-csv --quiet
   under "Skipped" with the reason rather than failing silently.
 - **USB enclosures** often need an explicit device type. The script already retries with
   `-d sat`, `-d nvme`, `-d scsi`, and `-d auto` before giving up.
+- **Partitions are fine to pass.** `/dev/sda1` resolves to its parent disk `/dev/sda`
+  automatically (SMART lives on the disk, not the partition), and multiple partitions of the
+  same disk are only reported once.
 - **Hardware RAID** hides member drives. Point at them explicitly, e.g.
   `--devices "/dev/bus/0"` with a controller-aware smartctl type.
 - **Drives that expose no wear attribute** are reported as `UNKNOWN` and count as **WARN**, never

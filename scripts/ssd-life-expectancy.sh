@@ -306,6 +306,29 @@ discover_devices() {
   fi
 }
 
+# SMART lives on the physical disk, not a partition. If someone passes
+# /dev/sda1 or /dev/nvme0n1p2, walk up to the parent disk.
+resolve_parent_disk() {
+  local dev="$1" base parent
+  base="$(basename "$dev")"
+  if [ -e "/sys/class/block/$base/partition" ]; then
+    if command -v lsblk >/dev/null 2>&1; then
+      parent="$(lsblk -no PKNAME "$dev" 2>/dev/null | head -1 | tr -d ' ')"
+      [ -n "$parent" ] && { echo "/dev/$parent"; return; }
+    fi
+    # sysfs fallback: /sys/class/block/sda1 -> .../block/sda/sda1
+    parent="$(basename "$(dirname "$(readlink -f "/sys/class/block/$base")")")"
+    [ -n "$parent" ] && [ "$parent" != "block" ] && { echo "/dev/$parent"; return; }
+  fi
+  # Name-pattern fallback, for when the node isn't in sysfs (explicit --devices).
+  case "$dev" in
+    /dev/nvme[0-9]*n[0-9]*p[0-9]*) echo "${dev%p*}"; return ;;
+    /dev/mmcblk[0-9]*p[0-9]*)      echo "${dev%p*}"; return ;;
+    /dev/[shv]d[a-z][0-9]*)        echo "$dev" | sed -E 's/[0-9]+$//'; return ;;
+  esac
+  echo "$dev"
+}
+
 is_rotational() {
   local dev="$1" base
   base="$(basename "$dev")"
@@ -370,6 +393,7 @@ master_write() {
 # Main scan
 # ---------------------------------------------------------------------------
 BEST_DTYPE=""
+SEEN_DEVS=""
 UNKNOWN_REASONS=()
 ROWS=()
 JSON_ITEMS=()
@@ -379,7 +403,12 @@ WORST=0          # 0 ok, 1 warn, 2 critical
 FOUND=0
 UNKNOWN_COUNT=0
 
-for DEV in $(discover_devices); do
+for RAW_DEV in $(discover_devices); do
+  DEV="$(resolve_parent_disk "$RAW_DEV")"
+  [ "$DEV" = "$RAW_DEV" ] || say "NOTE: $RAW_DEV is a partition — reading SMART from its disk $DEV."
+  # Skip if we already covered this disk via another partition.
+  case " ${SEEN_DEVS:-} " in *" $DEV "*) continue ;; esac
+  SEEN_DEVS="${SEEN_DEVS:-} $DEV"
   # Autodetected devices must be real nodes; an explicit --devices list is
   # trusted as-is so odd paths (controller pass-through, /dev/bsg/...) work.
   if [ -z "$DEVICES_OVERRIDE" ] && [ ! -b "$DEV" ] && [ ! -c "$DEV" ]; then
