@@ -45,7 +45,7 @@ Level.io can alert on the exit code:
 | Exit | Status | Trigger |
 | --- | --- | --- |
 | `0` | OK | healthy |
-| `1` | WARN | ≤ 20% life left, or ≤ 180 days projected |
+| `1` | WARN | ≤ 20% life left, ≤ 180 days projected, or a drive whose wear data could not be read |
 | `2` | CRITICAL | ≤ 10% life left, ≤ 60 days projected, available spare below threshold, or SMART self-assessment `FAILED` |
 | `3` | ERROR | not root, `smartctl` missing, or no drives found |
 
@@ -125,7 +125,8 @@ To alert on failing drives, add a condition on the script's **exit code ≥ 1** 
 The script extracts an **asset ID** from the hostname and uses it as the report key and
 filename, so `md-4004.corp.local` becomes asset `md-4004` and file `md-4004_ssd-health.csv`.
 
-Default pattern is `[A-Za-z]{2,6}-[0-9]{2,6}`, which matches `md-4004`, `wks-12`, `srv-100234`.
+Default pattern is `[A-Za-z]{2,6}-?[0-9]{2,6}` — the hyphen is optional, so it matches both
+`md-4004` and `md4065`, plus `wks-12`, `srv100234`.
 Override with `SSD_HOST_REGEX` if your convention differs. If nothing matches, the full
 hostname is used, so it never fails closed.
 
@@ -174,7 +175,9 @@ Every option is a flag **or** an environment variable (use env vars in Level.io)
 | `--include-hdd` | `SSD_INCLUDE_HDD` | `false` | also report spinning disks |
 | `--devices` | `SSD_DEVICES` | autodetect | explicit device list |
 | `--hostname` | `SSD_HOSTNAME` | detected | override hostname |
-| `--host-regex` | `SSD_HOST_REGEX` | `[A-Za-z]{2,6}-[0-9]{2,6}` | asset-id extraction |
+| `--host-regex` | `SSD_HOST_REGEX` | `[A-Za-z]{2,6}-?[0-9]{2,6}` | asset-id extraction |
+| `--debug` | `SSD_DEBUG` | `false` | dump raw smartctl output per drive |
+| `--unknown-ok` | `SSD_UNKNOWN_IS_WARN` | `true` | treat unreadable drives as OK instead of WARN |
 | `--warn-pct` | `SSD_WARN_PCT` | `20` | WARN at/below this % life left |
 | `--crit-pct` | `SSD_CRIT_PCT` | `10` | CRITICAL at/below this % |
 | `--warn-days` | `SSD_WARN_DAYS` | `180` | WARN at/below projected days |
@@ -214,5 +217,21 @@ sudo ./scripts/ssd-life-expectancy.sh --output-mode none --emit-csv --quiet
   `-d sat`, `-d nvme`, `-d scsi`, and `-d auto` before giving up.
 - **Hardware RAID** hides member drives. Point at them explicitly, e.g.
   `--devices "/dev/bus/0"` with a controller-aware smartctl type.
-- **Drives that expose no wear attribute** are reported as `UNKNOWN`, not as healthy — check the
-  `life_source` column to see what was used.
+- **Drives that expose no wear attribute** are reported as `UNKNOWN` and count as **WARN**, never
+  as healthy — a drive you cannot read is not a drive you know is fine. Pass `--unknown-ok` if you
+  would rather they stay silent. Check the `life_source` column to see which attribute was used.
+- **Old smartctl versions** (e.g. 6.6 on Ubuntu 20.04) may answer a bare `smartctl -a` with the
+  identity block but no attribute table. The script tries every device type and keeps the richest
+  response rather than the first one that merely returns a serial number, so this is handled — but
+  if a drive still reports `UNKNOWN`, run with `--debug` to dump the raw output and see why.
+
+## Troubleshooting a drive that reports UNKNOWN
+
+```bash
+sudo ./scripts/ssd-life-expectancy.sh --debug --output-mode none
+```
+
+This prints the winning `smartctl` invocation, the full raw output, and the parsed attribute
+table for each drive. If the attribute table is empty, the drive or controller is not exposing
+one; if it has rows but no wear attribute was matched, send the dump so the attribute can be
+added to the lookup list.

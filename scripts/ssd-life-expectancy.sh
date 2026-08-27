@@ -36,13 +36,15 @@ STATE_FILE="${SSD_STATE_FILE:-/var/lib/ssd-life-expectancy/state.csv}"
 # NOTE: assigned in two steps on purpose — ${VAR:-default} truncates a default
 # containing "}" (bash ends the expansion at the first one), which silently
 # mangled this regex and broke asset-id extraction.
-HOST_REGEX_DEFAULT='[A-Za-z]{2,6}-[0-9]{2,6}'                   # matches md-4004
+HOST_REGEX_DEFAULT='[A-Za-z]{2,6}-?[0-9]{2,6}'                  # matches md-4004 AND md4065
 HOST_REGEX="${SSD_HOST_REGEX:-}"
 [ -n "$HOST_REGEX" ] || HOST_REGEX="$HOST_REGEX_DEFAULT"
 HOSTNAME_OVERRIDE="${SSD_HOSTNAME:-}"
 DEVICES_OVERRIDE="${SSD_DEVICES:-}"              # space-separated, skip autodetect
 EMIT_CSV="${SSD_EMIT_CSV:-false}"                # dump raw CSV rows to stdout
 QUIET="${SSD_QUIET:-false}"
+DEBUG="${SSD_DEBUG:-false}"                      # dump raw smartctl output
+UNKNOWN_IS_WARN="${SSD_UNKNOWN_IS_WARN:-true}"   # unreadable drive => WARN, not "healthy"
 LOCK_TIMEOUT="${SSD_LOCK_TIMEOUT:-30}"
 
 WARN_PCT="${SSD_WARN_PCT:-20}"     # life remaining % -> WARN at or below
@@ -70,6 +72,8 @@ Output
   --append-history       append to local file instead of overwriting
   --emit-csv             print raw CSV rows to stdout (handy for Level.io output capture)
   --quiet                suppress the human-readable summary
+  --debug                dump raw smartctl output for each drive (for troubleshooting)
+  --unknown-ok           treat unreadable drives as OK instead of WARN
 
 Selection
   --include-hdd          include spinning disks (default: SSD/NVMe only)
@@ -105,6 +109,8 @@ while [ $# -gt 0 ]; do
     --append-history)  APPEND_HISTORY=true; shift ;;
     --emit-csv)        EMIT_CSV=true; shift ;;
     --quiet)           QUIET=true; shift ;;
+    --debug)           DEBUG=true; shift ;;
+    --unknown-ok)      UNKNOWN_IS_WARN=false; shift ;;
     --include-hdd)     INCLUDE_HDD=true; shift ;;
     --devices)         DEVICES_OVERRIDE="${2:-}"; shift 2 ;;
     --hostname)        HOSTNAME_OVERRIDE="${2:-}"; shift 2 ;;
@@ -246,19 +252,39 @@ attr_norm() { printf '%s\n' "$ATTRS" | awk -v id="$1" '$1==id && NF>=8 {print $4
 # RAW_VALUE column (last field) for an ATA attribute id.
 attr_raw()  { printf '%s\n' "$ATTRS" | awk -v id="$1" '$1==id && NF>=8 {print $NF; exit}'; }
 
-# Fetch SMART data, trying device-type fallbacks for USB bridges / controllers.
+# Fetch SMART data, trying every device type and keeping the RICHEST response.
+#
+# Older smartctl (e.g. 6.6) on some controllers answers a bare "-a" with the
+# identity block but NO attribute table — which looks like a success but
+# carries no wear data. So we score each candidate and keep the best one
+# instead of accepting the first that merely has a serial number.
+smart_score() {
+  local o="$1" sc=0
+  printf '%s\n' "$o" | grep -qE '^ID#[[:space:]]+ATTRIBUTE_NAME' && sc=$((sc+4))   # ATA attribute table
+  printf '%s\n' "$o" | grep -qiE 'Percentage Used|SMART/Health Information' && sc=$((sc+4))  # NVMe health log
+  printf '%s\n' "$o" | grep -qiE 'SMART overall-health|SMART Health Status' && sc=$((sc+2))
+  printf '%s\n' "$o" | grep -qiE 'Serial Number|Device Model|Model Number' && sc=$((sc+1))
+  echo "$sc"
+}
+
 read_smart() {
-  local dev="$1" out=""
-  for dtype in "" "-d sat" "-d nvme" "-d scsi" "-d auto"; do
+  local dev="$1" out="" best="" best_score=0 sc
+  for dtype in "" "-d sat" "-d nvme" "-d scsi" "-d auto" "-d sat,12"; do
     # shellcheck disable=SC2086
     out="$(smartctl -a $dtype "$dev" 2>/dev/null)"
-    if printf '%s' "$out" | grep -qiE 'Serial Number|Device Model|Model Number|SMART overall-health|SMART Health Status|Percentage Used'; then
-      printf '%s' "$out"
-      return 0
+    [ -n "$out" ] || continue
+    sc="$(smart_score "$out")"
+    if [ "$sc" -gt "$best_score" ]; then
+      best_score="$sc"; best="$out"; BEST_DTYPE="$dtype"
     fi
+    # Score >=5 means we have both identity and real health data; stop looking.
+    [ "$best_score" -ge 5 ] && break
   done
-  # Nothing usable — return empty so the caller records a clean "unsupported".
-  return 1
+  [ "$best_score" -gt 0 ] || return 1
+  # Command substitution runs this in a subshell, so a variable assignment
+  # cannot reach the caller — pass the winning type back as a marker line.
+  printf '#SSD_DTYPE:%s\n%s' "${BEST_DTYPE:-default}" "$best"
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -340,12 +366,14 @@ master_write() {
 # ---------------------------------------------------------------------------
 # Main scan
 # ---------------------------------------------------------------------------
+BEST_DTYPE=""
 ROWS=()
 JSON_ITEMS=()
 SUMMARY_LINES=()
 SKIPPED=()
 WORST=0          # 0 ok, 1 warn, 2 critical
 FOUND=0
+UNKNOWN_COUNT=0
 
 for DEV in $(discover_devices); do
   # Autodetected devices must be real nodes; an explicit --devices list is
@@ -359,7 +387,22 @@ for DEV in $(discover_devices); do
     continue
   fi
 
+  # Split the marker line back off the payload.
+  BEST_DTYPE="$(printf '%s\n' "$SMART" | sed -n '1s/^#SSD_DTYPE://p')"
+  SMART="$(printf '%s\n' "$SMART" | tail -n +2)"
+  [ -n "$BEST_DTYPE" ] || BEST_DTYPE="default"
+
   ATTRS="$(attr_table)"
+
+  if [ "$DEBUG" = "true" ]; then
+    echo "=================== DEBUG: $DEV ==================="
+    echo "--- winning invocation: smartctl -a $([ "$BEST_DTYPE" = "default" ] || echo "$BEST_DTYPE") $DEV"
+    echo "--- raw smartctl output ---"
+    printf '%s\n' "$SMART"
+    echo "--- parsed attribute table (${DEV}) ---"
+    if [ -n "$ATTRS" ]; then printf '%s\n' "$ATTRS"; else echo "(EMPTY — no attribute table found)"; fi
+    echo "=================== END DEBUG: $DEV ==================="
+  fi
 
   # --- protocol / media type -------------------------------------------------
   PROTOCOL="ata"
@@ -423,7 +466,8 @@ for DEV in $(discover_devices); do
     # ATA/SATA SSDs: vendors disagree, so try the known life attributes in order.
     # For these IDs the NORMALIZED value is percent-of-life-remaining.
     for pair in "231:SSD_Life_Left" "233:Media_Wearout_Indicator" "202:Percent_Lifetime_Remain" \
-                "177:Wear_Leveling_Count" "173:Ave_Block_Erase_Count" "169:Remaining_Life"; do
+                "177:Wear_Leveling_Count" "173:Ave_Block_Erase_Count" "169:Remaining_Life" \
+                "232:Endurance_Remaining" "209:Remaining_Life"; do
       aid="${pair%%:*}"; aname="${pair##*:}"
       v="$(attr_norm "$aid")"
       if is_num "${v:-}" && [ "${v:-0}" -gt 0 ] 2>/dev/null && [ "${v:-0}" -le 100 ] 2>/dev/null; then
@@ -433,6 +477,16 @@ for DEV in $(discover_devices); do
         break
       fi
     done
+    # Last resort: match on attribute NAME, for drives whose vendor used an
+    # unexpected ID for wear (or a smartctl too old to know the drive).
+    if [ -z "$LIFE_REMAIN" ] && [ -n "$ATTRS" ]; then
+      read -r n_id n_name n_val <<EOF_ATTR
+$(printf '%s\n' "$ATTRS" | awk 'tolower($2) ~ /life|wear|lifetime|endurance|remain/ && NF>=8 {print $1" "$2" "$4+0; exit}')
+EOF_ATTR
+      if is_num "${n_val:-}" && [ "${n_val:-0}" -gt 0 ] 2>/dev/null && [ "${n_val:-101}" -le 100 ] 2>/dev/null; then
+        LIFE_REMAIN="$n_val"; LIFE_USED="$((100 - n_val))"; LIFE_SOURCE="ata:${n_id}_${n_name}"
+      fi
+    fi
     # Crucial/Micron style: 202 raw holds percent USED, not remaining.
     if [ -z "$LIFE_REMAIN" ]; then
       v="$(num "$(attr_raw 202)")"
@@ -542,6 +596,12 @@ EOF3
   case "$STATUS" in
     CRITICAL) [ "$WORST" -lt 2 ] && WORST=2 ;;
     WARN)     [ "$WORST" -lt 1 ] && WORST=1 ;;
+    UNKNOWN)
+      UNKNOWN_COUNT=$((UNKNOWN_COUNT+1))
+      # A drive we cannot read is NOT a healthy drive. Surfacing it as OK is
+      # how a dying disk hides from monitoring.
+      [ "$UNKNOWN_IS_WARN" = "true" ] && [ "$WORST" -lt 1 ] && WORST=1
+      ;;
   esac
 
   # --- emit ------------------------------------------------------------------
@@ -608,9 +668,22 @@ if [ "${#SKIPPED[@]}" -gt 0 ] && [ "$QUIET" != "true" ]; then
   for s in "${SKIPPED[@]}"; do say "  - $s"; done
 fi
 say ""
+HEALTHY=$((FOUND - UNKNOWN_COUNT))
+if [ "$UNKNOWN_COUNT" -gt 0 ]; then
+  say "NOTE: $UNKNOWN_COUNT of $FOUND drive(s) exposed no wear attribute — their health is UNKNOWN, not OK."
+  say "      Re-run with --debug to dump the raw smartctl output for those drives."
+fi
 case "$WORST" in
-  0) say "RESULT: OK — all drives healthy ($FOUND scanned)" ;;
-  1) say "RESULT: WARN — at least one drive is wearing out ($FOUND scanned)" ;;
+  0) if [ "$UNKNOWN_COUNT" -gt 0 ]; then
+       say "RESULT: OK — $HEALTHY drive(s) healthy, $UNKNOWN_COUNT unreadable ($FOUND scanned)"
+     else
+       say "RESULT: OK — all drives healthy ($FOUND scanned)"
+     fi ;;
+  1) if [ "$UNKNOWN_COUNT" -gt 0 ] && [ "$HEALTHY" -eq 0 ]; then
+       say "RESULT: WARN — could not read wear data from any drive ($FOUND scanned)"
+     else
+       say "RESULT: WARN — at least one drive needs attention ($FOUND scanned)"
+     fi ;;
   2) say "RESULT: CRITICAL — replace drive(s) ($FOUND scanned)" ;;
 esac
 
