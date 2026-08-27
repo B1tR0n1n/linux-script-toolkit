@@ -224,10 +224,13 @@ sudo ./scripts/ssd-life-expectancy.sh --output-mode none --emit-csv --quiet
 - **Drives that expose no wear attribute** are reported as `UNKNOWN` and count as **WARN**, never
   as healthy — a drive you cannot read is not a drive you know is fine. Pass `--unknown-ok` if you
   would rather they stay silent. Check the `life_source` column to see which attribute was used.
-- **Old smartctl versions** (e.g. 6.6 on Ubuntu 20.04) may answer a bare `smartctl -a` with the
-  identity block but no attribute table. The script tries every device type and keeps the richest
-  response rather than the first one that merely returns a serial number, so this is handled — but
-  if a drive still reports `UNKNOWN`, run with `--debug` to dump the raw output and see why.
+- **Old smartctl versions** (confirmed on smartctl 6.6 / Ubuntu 20.04 with Crucial MX500) can
+  answer `smartctl -a` with the identity and health blocks but **silently omit the attribute
+  table**, even though `smartctl -A` returns it fine. `-a` is documented as a superset of `-A`,
+  so this is easy to get wrong. The script therefore never trusts `-a` alone: if the attribute
+  table is missing it re-asks with an explicit `-A` before giving up.
+- **Attribute names may read `Unknown_Attribute`** on an smartctl older than the drive. That is
+  cosmetic — the lookup matches on attribute **ID**, not name, so wear is still read correctly.
 
 ## Troubleshooting a drive that reports UNKNOWN
 

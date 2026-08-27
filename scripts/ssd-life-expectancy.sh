@@ -252,8 +252,12 @@ attr_table() {
 
 # Normalized VALUE column (col 4) for an ATA attribute id.
 attr_norm() { printf '%s\n' "$ATTRS" | awk -v id="$1" '$1==id && NF>=8 {print $4+0; exit}'; }
-# RAW_VALUE column (last field) for an ATA attribute id.
-attr_raw()  { printf '%s\n' "$ATTRS" | awk -v id="$1" '$1==id && NF>=8 {print $NF; exit}'; }
+# RAW_VALUE for an ATA attribute id. RAW_VALUE is column 10; do NOT use $NF,
+# because smartctl appends notes to some rows, e.g.
+#   194 Temperature_Celsius ... 38 (Min/Max 0/71)
+# where $NF is "0/71)" rather than the value.
+attr_raw()  { printf '%s\n' "$ATTRS" | awk -v id="$1" '$1==id && NF>=10 {print $10; exit}
+                                                       $1==id && NF>=8 && NF<10 {print $NF; exit}'; }
 
 # Fetch SMART data, trying every device type and keeping the RICHEST response.
 #
@@ -425,11 +429,41 @@ for RAW_DEV in $(discover_devices); do
   SMART="$(printf '%s\n' "$SMART" | tail -n +2)"
   [ -n "$BEST_DTYPE" ] || BEST_DTYPE="default"
 
+  SUPPLEMENTED=""
   ATTRS="$(attr_table)"
+
+  # "-a" is documented as a superset of "-A", but on some smartctl/drive
+  # combinations (confirmed on smartctl 6.6 + Crucial MX500) it returns
+  # identity and health while silently omitting the attribute table. Ask for
+  # the attributes explicitly whenever they are missing instead of trusting -a.
+  if [ -z "$ATTRS" ]; then
+    if [ "$BEST_DTYPE" = "default" ] || [ -z "$BEST_DTYPE" ]; then
+      SUPP="$(smartctl -A "$DEV" 2>/dev/null)"
+    else
+      # shellcheck disable=SC2086
+      SUPP="$(smartctl -A $BEST_DTYPE "$DEV" 2>/dev/null)"
+    fi
+    if [ -n "$SUPP" ] && printf '%s\n' "$SUPP" | grep -qE '^ID#[[:space:]]+ATTRIBUTE_NAME'; then
+      SMART="$(printf '%s\n%s\n' "$SMART" "$SUPP")"
+      ATTRS="$(attr_table)"
+      SUPPLEMENTED="smartctl -A"
+    fi
+  fi
+
+  # The NVMe health log can go missing from "-a" for the same reason.
+  if [ "${PROTOCOL:-}" = "nvme" ] && ! printf '%s\n' "$SMART" | grep -qi 'Percentage Used'; then
+    SUPP="$(smartctl -A "$DEV" 2>/dev/null)"
+    if printf '%s\n' "$SUPP" | grep -qi 'Percentage Used'; then
+      SMART="$(printf '%s\n%s\n' "$SMART" "$SUPP")"
+      SUPPLEMENTED="smartctl -A"
+    fi
+  fi
+
 
 
   if [ "$DEBUG" = "true" ]; then
     echo "=================== DEBUG: $DEV ==================="
+    [ -n "${SUPPLEMENTED:-}" ] && echo "--- attribute table recovered via: ${SUPPLEMENTED} $DEV"
     echo "--- winning invocation: smartctl -a $([ "$BEST_DTYPE" = "default" ] || echo "$BEST_DTYPE") $DEV"
     echo "--- raw smartctl output ---"
     printf '%s\n' "$SMART"
