@@ -7,6 +7,7 @@ Operational Linux scripts for fleet management via [Level.io](https://level.io) 
 | [`scripts/install-ssd-monitor.sh`](scripts/install-ssd-monitor.sh) | **Start here.** One paste: installs deps, installs the reporter, schedules it weekly, runs it now. |
 | [`scripts/ssd-life-expectancy.sh`](scripts/ssd-life-expectancy.sh) | The reporter itself. Run it directly if you don't want anything installed. |
 | [`scripts/collect-ssd-output.sh`](scripts/collect-ssd-output.sh) | Build a fleet master CSV from report output you already have (paste Level.io run history in). No SSH. |
+| [`scripts/level-api-pull.py`](scripts/level-api-pull.py) | Pull report rows from Level's API and build the fleet CSV in one command. |
 | [`scripts/setup-push-key.sh`](scripts/setup-push-key.sh) | RMM script: install the push key on each endpoint and verify it can reach the collector. |
 | [`scripts/pull-ssd-reports.sh`](scripts/pull-ssd-reports.sh) | SSH *out* to each machine and fetch its report. Needs an ssh client where you run it. |
 | [`scripts/merge-ssd-reports.sh`](scripts/merge-ssd-reports.sh) | Roll individual per-machine CSV files into one master file. |
@@ -181,7 +182,39 @@ the local files later and merge them:
 | A shared mount every machine can write to | `SSD_MASTER_PATH` | NFS/CIFS mount | any size |
 | **One Linux box the machines can SSH to** | **`SSD_PUSH_TARGET`** | **an ssh key per endpoint** | **any size** |
 | SSH access *out* to the machines | `pull-ssd-reports.sh` | ssh + scp, a host list | hundreds |
+| **A Level API key** | **`level-api-pull.py`** | **an API key** | **any size** |
 | Only the RMM's run output | `collect-ssd-output.sh` | nothing | tens |
+
+### Level API — one command, nothing to install on the endpoints
+
+Level's API exposes each automation run's step output, which is where the emitted CSV row
+lands. `level-api-pull.py` (stdlib Python 3 only) lists the runs, fetches each with
+`include_steps=true`, extracts the row from the output text, and writes the fleet CSV.
+
+```bash
+export LEVEL_API_KEY=xxxxx                       # Settings -> API keys
+./scripts/level-api-pull.py --automation-id <id> -o fleet-ssd-master.csv
+```
+
+```
+Listed 900 automation run(s)
+  ... 450/900 runs fetched
+898 drive(s) across 898 machine(s) -> fleet-ssd-master.csv
+  CRITICAL: 41
+  WARN:     117
+  2 run(s) produced no row — see fleet-ssd-master-missing.txt
+```
+
+Requires `SSD_EMIT_CSV=true`, since the row has to be in the run's output to reach the API.
+
+The `Authorization` header value format is not documented, so the script sends the raw key
+first and retries as `Bearer <key>` on a 401, then remembers which worked. If the run-list
+endpoint differs from `/v2/automation-runs`, pass `--list-path`; if listing is unavailable
+entirely, `--run-ids-file` takes a list of run ids instead. `--save-raw` dumps every step's
+output for troubleshooting.
+
+Runs that produced no row are written to `<output>-missing.txt` rather than being counted as
+absent — a machine quietly missing from the fleet file is how a dying drive hides.
 
 ### No shared mount? Push to a collection host
 
