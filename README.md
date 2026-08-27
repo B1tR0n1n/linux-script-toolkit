@@ -173,13 +173,53 @@ the local files later and merge them:
 ./scripts/merge-ssd-reports.sh -i ./collected -o fleet-ssd-master.csv --sort-by-life
 ```
 
-### Three ways to get one fleet CSV — pick by what you have
+### Four ways to get one fleet CSV — pick by what you have
 
-| You have | Use | Needs |
-| --- | --- | --- |
-| A shared mount every machine can write to | `SSD_MASTER_PATH` in the installer | NFS/CIFS mount |
-| Report output in the RMM (Level.io run history) | `collect-ssd-output.sh` | nothing |
-| SSH access to the machines | `pull-ssd-reports.sh` | ssh + scp |
+| You have | Use | Needs | Scales to |
+| --- | --- | --- | --- |
+| A shared mount every machine can write to | `SSD_MASTER_PATH` | NFS/CIFS mount | any size |
+| **One Linux box the machines can SSH to** | **`SSD_PUSH_TARGET`** | **an ssh key per endpoint** | **any size** |
+| SSH access *out* to the machines | `pull-ssd-reports.sh` | ssh + scp, a host list | hundreds |
+| Only the RMM's run output | `collect-ssd-output.sh` | nothing | tens |
+
+### No shared mount? Push to a collection host
+
+Each machine scp's its own report to one server after every run. There is no share to
+maintain, and no central box fanning SSH out to every endpoint — the traffic is one small
+file per machine, outbound, on the machine's own schedule. This is the option that scales
+when a mount is not available.
+
+In the installer:
+
+```bash
+: "${SSD_PUSH_TARGET:=ssdcollect@mddb:/srv/ssd-reports/}"
+```
+
+Report filenames are keyed on asset id, so they land side by side without collisions.
+Build the master on the collection host, from the same directory:
+
+```bash
+./collect-ssd-output.sh /srv/ssd-reports -o fleet-ssd-master.csv
+```
+
+**Setting up the collection host** (once):
+
+```bash
+# on the collector
+sudo useradd -m -d /srv/ssd-collect -s /bin/bash ssdcollect
+sudo mkdir -p /srv/ssd-reports && sudo chown ssdcollect /srv/ssd-reports
+
+# on each endpoint — deploy the key via your RMM
+sudo ssh-keygen -t ed25519 -N '' -f /root/.ssh/id_ed25519    # if it has no key
+# then add each endpoint's public key to /srv/ssd-collect/.ssh/authorized_keys
+```
+
+Give that account nothing beyond write access to the report directory. It is reachable
+from every endpoint in the fleet, so it should not be able to do anything else.
+
+A failed push is reported as a warning on the endpoint and in the RMM output — a machine
+silently missing from the fleet view is how a dying drive stays hidden. `SSD_PUSH_RETRIES`
+(default 2) controls retries with backoff.
 
 ### collect-ssd-output.sh
 
@@ -283,6 +323,7 @@ Every option is a flag **or** an environment variable (use env vars in Level.io)
 | `--emit-csv` | `SSD_EMIT_CSV` | `false` | print CSV rows to stdout |
 | `--quiet` | `SSD_QUIET` | `false` | suppress the summary table |
 | `--always-exit-ok` | `SSD_ALWAYS_EXIT_OK` | `false` | always exit 0, for RMMs that fail an action on non-zero exit |
+| `--push-target` | `SSD_PUSH_TARGET` | — | scp the report to `user@host:/path/` after writing it |
 | `--include-hdd` | `SSD_INCLUDE_HDD` | `false` | also report spinning disks |
 | `--devices` | `SSD_DEVICES` | autodetect | explicit device list |
 | `--hostname` | `SSD_HOSTNAME` | detected | override hostname |

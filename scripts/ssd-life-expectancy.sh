@@ -18,7 +18,7 @@
 #
 set -uo pipefail
 
-VERSION="1.6.0"
+VERSION="1.7.0"
 SCRIPT_NAME="ssd-life-expectancy"
 
 # ---------------------------------------------------------------------------
@@ -52,6 +52,17 @@ QUIET="${SSD_QUIET:-false}"
 # status still appears in the output and the CSV, it just stops being signalled
 # through the exit code. Alert on the RESULT line instead.
 ALWAYS_EXIT_OK="${SSD_ALWAYS_EXIT_OK:-false}"
+
+# Push the report to a collection host over SSH after writing it locally.
+# This is the answer for a fleet with no shared mount: each machine sends its
+# own small file to one server it can already reach, so there is no share to
+# maintain and no central box fanning SSH out to every endpoint. Report
+# filenames are keyed on asset id, so they land side by side without
+# collisions and can be merged in place.
+#   SSD_PUSH_TARGET="ssdcollect@mddb:/srv/ssd-reports/"
+PUSH_TARGET="${SSD_PUSH_TARGET:-}"
+PUSH_OPTS="${SSD_PUSH_OPTS:--o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new}"
+PUSH_RETRIES="${SSD_PUSH_RETRIES:-2}"
 DEBUG="${SSD_DEBUG:-false}"                      # dump raw smartctl output
 ENABLE_SMART="${SSD_ENABLE_SMART:-true}"         # turn SMART on if the drive has it disabled
 UNKNOWN_IS_WARN="${SSD_UNKNOWN_IS_WARN:-true}"   # unreadable drive => WARN, not "healthy"
@@ -85,6 +96,8 @@ Output
   --emit-csv             print raw CSV rows to stdout (handy for Level.io output capture)
   --quiet                suppress the human-readable summary
   --always-exit-ok       always exit 0 (for RMMs that fail an action on non-zero exit)
+  --push-target T        scp the report to T after writing it, e.g. user@host:/srv/reports/
+                         (env SSD_PUSH_TARGET) — for fleets with no shared mount
   --debug                dump raw smartctl output for each drive (for troubleshooting)
   --unknown-ok           treat unreadable drives as OK instead of WARN
   --no-enable-smart      do not run 'smartctl -s on' when a drive has SMART disabled
@@ -124,6 +137,7 @@ while [ $# -gt 0 ]; do
     --emit-csv)        EMIT_CSV=true; shift ;;
     --quiet)           QUIET=true; shift ;;
     --always-exit-ok)  ALWAYS_EXIT_OK=true; shift ;;
+    --push-target)     PUSH_TARGET="${2:-}"; shift 2 ;;
     --debug)           DEBUG=true; shift ;;
     --unknown-ok)      UNKNOWN_IS_WARN=false; shift ;;
     --no-enable-smart) ENABLE_SMART=false; shift ;;
@@ -1063,6 +1077,40 @@ write_master() {
   [ "$ok" -gt 0 ] && say "Appended $ok row(s) to $MASTER_PATH"
 }
 
+push_report() {
+  [ -n "$PUSH_TARGET" ] || return 0
+  if ! command -v scp >/dev/null 2>&1; then
+    warn "WARN: SSD_PUSH_TARGET is set but scp is not installed; skipping push."
+    return 1
+  fi
+  local base="${LOCAL_NAME:-${ASSET_ID}_ssd-health}"
+  base="${base%.csv}"; base="${base%.json}"
+  local files=() f
+  for f in "$LOCAL_DIR/${base}.csv" "$LOCAL_DIR/${base}.json"; do
+    [ -f "$f" ] && files+=("$f")
+  done
+  if [ "${#files[@]}" -eq 0 ]; then
+    warn "WARN: nothing to push (no local report written — is --output-mode 'none'?)"
+    return 1
+  fi
+  local try=0 rc=1 err=""
+  while [ "$try" -le "$PUSH_RETRIES" ]; do
+    # shellcheck disable=SC2086
+    err="$(scp $PUSH_OPTS -q "${files[@]}" "$PUSH_TARGET" 2>&1)"; rc=$?
+    [ "$rc" -eq 0 ] && break
+    try=$((try+1))
+    [ "$try" -le "$PUSH_RETRIES" ] && sleep $((try * 3))
+  done
+  if [ "$rc" -eq 0 ]; then
+    say "Pushed ${#files[@]} file(s) to $PUSH_TARGET"
+    return 0
+  fi
+  # A failed push is a machine missing from the fleet view, which is how a
+  # dying drive hides. Say so loudly rather than exiting clean.
+  warn "WARN: push to $PUSH_TARGET failed after $((PUSH_RETRIES + 1)) attempt(s): $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-160)"
+  return 1
+}
+
 case "$OUTPUT_MODE" in
   local)  write_local ;;
   master) write_master ;;
@@ -1070,6 +1118,8 @@ case "$OUTPUT_MODE" in
   none)   : ;;
   *)      warn "WARN: unknown --output-mode '$OUTPUT_MODE'; defaulting to local"; write_local ;;
 esac
+
+push_report || true
 
 if [ "$EMIT_CSV" = "true" ]; then
   printf '%s\n' "$CSV_HEADER"

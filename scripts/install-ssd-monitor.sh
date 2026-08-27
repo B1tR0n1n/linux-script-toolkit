@@ -19,6 +19,13 @@ set -uo pipefail
 # ===========================================================================
 # CONFIG — edit these, or set them as Level.io script variables
 # ===========================================================================
+# --- COLLECTION WITHOUT A SHARED MOUNT -----------------------------------
+# Each machine scp's its own report to one collection host after every run.
+# No share to maintain, and no central box SSHing out to every endpoint.
+# Needs an SSH key on each machine that can write to that path.
+#   : "${SSD_PUSH_TARGET:=ssdcollect@mddb:/srv/ssd-reports/}"
+: "${SSD_PUSH_TARGET:=}"
+
 # --- FLEET MASTER FILE ---------------------------------------------------
 # Set SSD_MASTER_PATH to a path every machine can write to (an NFS/CIFS mount,
 # or any shared directory) and every machine appends to that one file. Writes
@@ -64,7 +71,7 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 3; }
 [ "$(id -u)" -eq 0 ] || die "must run as root (Level.io runs scripts as root by default)"
 
 # --- 1. install the reporter ------------------------------------------------
-say "==> install-ssd-monitor build 1.6.0"
+say "==> install-ssd-monitor build 1.7.0"
 say "==> Installing reporter to $SSD_INSTALL_PATH"
 mkdir -p "$(dirname "$SSD_INSTALL_PATH")" || die "cannot create $(dirname "$SSD_INSTALL_PATH")"
 
@@ -89,7 +96,7 @@ cat > "$SSD_INSTALL_PATH" <<'SSD_REPORTER_PAYLOAD_EOF'
 #
 set -uo pipefail
 
-VERSION="1.6.0"
+VERSION="1.7.0"
 SCRIPT_NAME="ssd-life-expectancy"
 
 # ---------------------------------------------------------------------------
@@ -123,6 +130,17 @@ QUIET="${SSD_QUIET:-false}"
 # status still appears in the output and the CSV, it just stops being signalled
 # through the exit code. Alert on the RESULT line instead.
 ALWAYS_EXIT_OK="${SSD_ALWAYS_EXIT_OK:-false}"
+
+# Push the report to a collection host over SSH after writing it locally.
+# This is the answer for a fleet with no shared mount: each machine sends its
+# own small file to one server it can already reach, so there is no share to
+# maintain and no central box fanning SSH out to every endpoint. Report
+# filenames are keyed on asset id, so they land side by side without
+# collisions and can be merged in place.
+#   SSD_PUSH_TARGET="ssdcollect@mddb:/srv/ssd-reports/"
+PUSH_TARGET="${SSD_PUSH_TARGET:-}"
+PUSH_OPTS="${SSD_PUSH_OPTS:--o BatchMode=yes -o ConnectTimeout=15 -o StrictHostKeyChecking=accept-new}"
+PUSH_RETRIES="${SSD_PUSH_RETRIES:-2}"
 DEBUG="${SSD_DEBUG:-false}"                      # dump raw smartctl output
 ENABLE_SMART="${SSD_ENABLE_SMART:-true}"         # turn SMART on if the drive has it disabled
 UNKNOWN_IS_WARN="${SSD_UNKNOWN_IS_WARN:-true}"   # unreadable drive => WARN, not "healthy"
@@ -156,6 +174,8 @@ Output
   --emit-csv             print raw CSV rows to stdout (handy for Level.io output capture)
   --quiet                suppress the human-readable summary
   --always-exit-ok       always exit 0 (for RMMs that fail an action on non-zero exit)
+  --push-target T        scp the report to T after writing it, e.g. user@host:/srv/reports/
+                         (env SSD_PUSH_TARGET) — for fleets with no shared mount
   --debug                dump raw smartctl output for each drive (for troubleshooting)
   --unknown-ok           treat unreadable drives as OK instead of WARN
   --no-enable-smart      do not run 'smartctl -s on' when a drive has SMART disabled
@@ -195,6 +215,7 @@ while [ $# -gt 0 ]; do
     --emit-csv)        EMIT_CSV=true; shift ;;
     --quiet)           QUIET=true; shift ;;
     --always-exit-ok)  ALWAYS_EXIT_OK=true; shift ;;
+    --push-target)     PUSH_TARGET="${2:-}"; shift 2 ;;
     --debug)           DEBUG=true; shift ;;
     --unknown-ok)      UNKNOWN_IS_WARN=false; shift ;;
     --no-enable-smart) ENABLE_SMART=false; shift ;;
@@ -1134,6 +1155,40 @@ write_master() {
   [ "$ok" -gt 0 ] && say "Appended $ok row(s) to $MASTER_PATH"
 }
 
+push_report() {
+  [ -n "$PUSH_TARGET" ] || return 0
+  if ! command -v scp >/dev/null 2>&1; then
+    warn "WARN: SSD_PUSH_TARGET is set but scp is not installed; skipping push."
+    return 1
+  fi
+  local base="${LOCAL_NAME:-${ASSET_ID}_ssd-health}"
+  base="${base%.csv}"; base="${base%.json}"
+  local files=() f
+  for f in "$LOCAL_DIR/${base}.csv" "$LOCAL_DIR/${base}.json"; do
+    [ -f "$f" ] && files+=("$f")
+  done
+  if [ "${#files[@]}" -eq 0 ]; then
+    warn "WARN: nothing to push (no local report written — is --output-mode 'none'?)"
+    return 1
+  fi
+  local try=0 rc=1 err=""
+  while [ "$try" -le "$PUSH_RETRIES" ]; do
+    # shellcheck disable=SC2086
+    err="$(scp $PUSH_OPTS -q "${files[@]}" "$PUSH_TARGET" 2>&1)"; rc=$?
+    [ "$rc" -eq 0 ] && break
+    try=$((try+1))
+    [ "$try" -le "$PUSH_RETRIES" ] && sleep $((try * 3))
+  done
+  if [ "$rc" -eq 0 ]; then
+    say "Pushed ${#files[@]} file(s) to $PUSH_TARGET"
+    return 0
+  fi
+  # A failed push is a machine missing from the fleet view, which is how a
+  # dying drive hides. Say so loudly rather than exiting clean.
+  warn "WARN: push to $PUSH_TARGET failed after $((PUSH_RETRIES + 1)) attempt(s): $(printf '%s' "$err" | tr '\n' ' ' | cut -c1-160)"
+  return 1
+}
+
 case "$OUTPUT_MODE" in
   local)  write_local ;;
   master) write_master ;;
@@ -1141,6 +1196,8 @@ case "$OUTPUT_MODE" in
   none)   : ;;
   *)      warn "WARN: unknown --output-mode '$OUTPUT_MODE'; defaulting to local"; write_local ;;
 esac
+
+push_report || true
 
 if [ "$EMIT_CSV" = "true" ]; then
   printf '%s\n' "$CSV_HEADER"
@@ -1182,6 +1239,8 @@ conf_line() {
   conf_line SSD_MASTER_PATH      "$SSD_MASTER_PATH"
   conf_line SSD_FORMAT           "$SSD_FORMAT"
   conf_line SSD_EMIT_CSV         "$SSD_EMIT_CSV"
+  conf_line SSD_PUSH_TARGET      "$SSD_PUSH_TARGET"
+  conf_line SSD_PUSH_RETRIES     "${SSD_PUSH_RETRIES:-2}"
   conf_line SSD_APPEND_HISTORY   "${SSD_APPEND_HISTORY:-false}"
   conf_line SSD_INCLUDE_HDD      "${SSD_INCLUDE_HDD:-false}"
   conf_line SSD_DEVICES          "${SSD_DEVICES:-}"
@@ -1312,6 +1371,9 @@ if [ "$SSD_RUN_NOW" = "true" ]; then
 fi
 
 say "==> Done. Reporter: $SSD_INSTALL_PATH   Config: $SSD_CONF_PATH"
+if [ -n "$SSD_PUSH_TARGET" ]; then
+  say "    Pushing reports to: $SSD_PUSH_TARGET"
+fi
 if [ -n "$SSD_MASTER_PATH" ]; then
   say "    Fleet master file: $SSD_MASTER_PATH"
 else

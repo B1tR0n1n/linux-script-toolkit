@@ -19,6 +19,13 @@ set -uo pipefail
 # ===========================================================================
 # CONFIG — edit these, or set them as Level.io script variables
 # ===========================================================================
+# --- COLLECTION WITHOUT A SHARED MOUNT -----------------------------------
+# Each machine scp's its own report to one collection host after every run.
+# No share to maintain, and no central box SSHing out to every endpoint.
+# Needs an SSH key on each machine that can write to that path.
+#   : "${SSD_PUSH_TARGET:=ssdcollect@mddb:/srv/ssd-reports/}"
+: "${SSD_PUSH_TARGET:=}"
+
 # --- FLEET MASTER FILE ---------------------------------------------------
 # Set SSD_MASTER_PATH to a path every machine can write to (an NFS/CIFS mount,
 # or any shared directory) and every machine appends to that one file. Writes
@@ -64,7 +71,7 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 3; }
 [ "$(id -u)" -eq 0 ] || die "must run as root (Level.io runs scripts as root by default)"
 
 # --- 1. install the reporter ------------------------------------------------
-say "==> install-ssd-monitor build 1.6.0"
+say "==> install-ssd-monitor build 1.7.0"
 say "==> Installing reporter to $SSD_INSTALL_PATH"
 mkdir -p "$(dirname "$SSD_INSTALL_PATH")" || die "cannot create $(dirname "$SSD_INSTALL_PATH")"
 
@@ -101,6 +108,8 @@ conf_line() {
   conf_line SSD_MASTER_PATH      "$SSD_MASTER_PATH"
   conf_line SSD_FORMAT           "$SSD_FORMAT"
   conf_line SSD_EMIT_CSV         "$SSD_EMIT_CSV"
+  conf_line SSD_PUSH_TARGET      "$SSD_PUSH_TARGET"
+  conf_line SSD_PUSH_RETRIES     "${SSD_PUSH_RETRIES:-2}"
   conf_line SSD_APPEND_HISTORY   "${SSD_APPEND_HISTORY:-false}"
   conf_line SSD_INCLUDE_HDD      "${SSD_INCLUDE_HDD:-false}"
   conf_line SSD_DEVICES          "${SSD_DEVICES:-}"
@@ -231,6 +240,9 @@ if [ "$SSD_RUN_NOW" = "true" ]; then
 fi
 
 say "==> Done. Reporter: $SSD_INSTALL_PATH   Config: $SSD_CONF_PATH"
+if [ -n "$SSD_PUSH_TARGET" ]; then
+  say "    Pushing reports to: $SSD_PUSH_TARGET"
+fi
 if [ -n "$SSD_MASTER_PATH" ]; then
   say "    Fleet master file: $SSD_MASTER_PATH"
 else
