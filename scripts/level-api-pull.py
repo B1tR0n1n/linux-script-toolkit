@@ -362,6 +362,11 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true")
     ap.add_argument("--discover", action="store_true",
                     help="probe likely endpoints and report which ones exist, then stop")
+    ap.add_argument("--list-devices", action="store_true",
+                    help="print device ids and hostnames, then stop")
+    ap.add_argument("--match", help="with --list-devices, only hostnames containing this (case-insensitive)")
+    ap.add_argument("--ids-only", action="store_true",
+                    help="with --list-devices, print bare ids - pipe straight into a device ids file")
     ap.add_argument("--list-webhooks", action="store_true",
                     help="find existing automation webhooks and print their tokens, then stop")
     ap.add_argument("--dump", metavar="PATH",
@@ -373,6 +378,30 @@ def main():
         sys.exit("ERROR: set LEVEL_API_KEY (Settings -> API keys in Level).")
 
     api = Level(key, args.base, args.verbose, args.insecure)
+
+    if args.list_devices:
+        try:
+            devs = all_pages(api, "/v2/devices", args.page_size, args.max_pages, args.verbose)
+        except ApiError as e:
+            sys.exit(f"ERROR: {e}")
+        if args.match:
+            m = args.match.lower()
+            devs = [d for d in devs
+                    if m in str(d.get("hostname") or d.get("name") or "").lower()]
+        if args.ids_only:
+            for d in devs:
+                if d.get("id"):
+                    print(d["id"])
+        else:
+            print(f"{len(devs)} device(s)"
+                  + (f" matching {args.match!r}" if args.match else "") + "\n")
+            for d in devs:
+                print(f"  {d.get('id','?'):<44}  {d.get('hostname') or d.get('name') or ''}")
+            if devs:
+                print("\nTo trigger just these:")
+                print(f"  --list-devices{' --match ' + args.match if args.match else ''} --ids-only > devs.txt")
+                print("  --trigger-token <token> --device-ids-file devs.txt")
+        return
 
     if args.list_webhooks:
         list_webhooks(api, args.page_size, args.verbose)

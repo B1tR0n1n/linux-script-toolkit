@@ -226,8 +226,16 @@ automation:
 
 The token is not a field of its own — it is the last path segment of the webhook `url`.
 If nothing is listed, add a **Webhook trigger** to the automation in Level to create one. `--all-devices`
-triggers every device the API lists; `--device-ids-file` restricts it; omit both and the
-webhook's own conditions decide. `--wait` (default 900s) bounds how long to wait for runs
+triggers every device the API lists — which is every machine, so scope it while testing:
+
+```bash
+./scripts/level-api-pull.py --list-devices --match md406 --ids-only > devs.txt
+./scripts/level-api-pull.py --trigger-token <token> --device-ids-file devs.txt -o test.csv
+```
+
+`--list-devices` prints ids with hostnames (`--match` filters, `--ids-only` prints bare ids
+for piping). Omit both `--all-devices` and `--device-ids-file` and the webhook's own
+conditions decide which devices run. `--wait` (default 900s) bounds how long to wait for runs
 to finish, and runs still going when it expires are reported rather than silently dropped.
 
 ```
